@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "dt-extension-migrator"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.scripts]
+dt-ext-migrator = "dt_extension_migrator.main:app"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+typer = {extras = ["all"], version = "^0.12.3"}
+pandas = "^2.2.2"
+dt = "^1.1.63"
+rich = "^13.7.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
