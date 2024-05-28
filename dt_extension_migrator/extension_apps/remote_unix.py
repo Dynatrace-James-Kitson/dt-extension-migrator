@@ -11,6 +11,9 @@ from typing import Optional, List
 
 app = typer.Typer()
 
+EF1_EXTENSION_ID = "custom.remote.python.remote_agent"
+EF2_EXTENSION_ID = "com.dynatrace.extension.remote-unix"
+
 
 def build_authentication_from_ef1(ef1_config: dict):
     authentication = {"username": ef1_config.get("username")}
@@ -84,7 +87,9 @@ def build_ef2_config_from_ef1(
         "pythonRemote": {"endpoints": []},
     }
 
-    print(f"{len(ef1_configurations)} endpoints will attempt to be added to the monitoring configuration.")
+    print(
+        f"{len(ef1_configurations)} endpoints will attempt to be added to the monitoring configuration."
+    )
     for index, row in ef1_configurations.iterrows():
         enabled = row["enabled"]
         properties: dict = json.loads(row["properties"])
@@ -158,21 +163,24 @@ def build_ef2_config_from_ef1(
     return base_config
 
 
-@app.command()
+@app.command(help="Pull EF1 remote unix configurations into a spreadsheet.")
 def pull(
     dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
     dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
-    output_file: Optional[str] = None,
-    index: Optional[List[str]] = ["group"],
+    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}.xlsx",
+    index: Annotated[
+        Optional[List[str]],
+        typer.Option(
+            help="Specify what property to group sheets by. Can be specified multipl times."
+        ),
+    ] = ["group"],
 ):
     dt = Dynatrace(dt_url, dt_token)
-    configs = dt.extensions.list_instances(
-        extension_id="custom.remote.python.remote_agent"
-    )
+    configs = dt.extensions.list_instances(extension_id=EF1_EXTENSION_ID)
     full_configs = []
 
     for config in track(configs, description="Pulling EF1 configs"):
-        config = config.get_full_configuration("custom.remote.python.remote_agent")
+        config = config.get_full_configuration(EF1_EXTENSION_ID)
         full_config = config.json()
         properties = full_config.get("properties", {})
         for key in properties:
@@ -182,7 +190,7 @@ def pull(
         full_configs.append(full_config)
 
     writer = pd.ExcelWriter(
-        output_file or f"custom.remote.python.remote_agent-export.xlsx",
+        output_file,
         engine="xlsxwriter",
     )
     df = pd.DataFrame(full_configs)
@@ -193,16 +201,32 @@ def pull(
             writer, sheet_name="-".join(key) or "Default", index=False, header=True
         )
     writer.close()
+    print(f"Exported configurations available in '{output_file}'")
 
 
 @app.command()
 def push(
     dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
     dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
-    input_file: Annotated[str, typer.Option()],
-    sheet: Annotated[str, typer.Option()],
+    input_file: Annotated[
+        str,
+        typer.Option(
+            help="The location of a previously pulled/exported list of EF1 endpoints"
+        ),
+    ],
+    sheet: Annotated[
+        str,
+        typer.Option(
+            help="The name of a sheet in a previously pulled/exported list of EF1 endpoints"
+        ),
+    ],
     ag_group: Annotated[str, typer.Option()],
-    version: Annotated[str, typer.Option()],
+    version: Annotated[
+        str,
+        typer.Option(
+            help="The version of the EF2 extension you would look to create this configuration for"
+        ),
+    ],
     skip_endpoint_auth: Annotated[bool, typer.Option()] = False,
     enabled: Annotated[bool, typer.Option()] = False,
 ):
@@ -214,10 +238,14 @@ def push(
     dt = Dynatrace(dt_url, dt_token, print_bodies=False)
     config = MonitoringConfigurationDto(ag_group, config)
     try:
-        result = dt.extensions_v2.post_monitoring_configurations("custom:remote-unix", [config])[0]
+        result = dt.extensions_v2.post_monitoring_configurations(
+            EF2_EXTENSION_ID, [config]
+        )[0]
         print(f"Configs created successfully. Response: {result['code']}")
         base_url = dt_url if not dt_url.endswith("/") else dt_url[:-1]
-        print(f"Link to monitoring configuration: {base_url}/ui/hub/ext/listing/registered/custom:remote-unix/{result['objectId']}/read")
+        print(
+            f"Link to monitoring configuration: {base_url}/ui/hub/ext/listing/registered/{EF2_EXTENSION_ID}/{result['objectId']}/read"
+        )
     except Exception as e:
         print(f"[bold red]{e}[/bold red]")
 
