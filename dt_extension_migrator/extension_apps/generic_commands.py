@@ -8,11 +8,21 @@ from rich import print
 
 import json
 from typing import Optional, List
+from enum import Enum
 
 app = typer.Typer()
 
-EF1_EXTENSION_ID = "custom.remote.python.remote_agent"
-EF2_EXTENSION_ID = "custom:remote-unix"
+EF1_EXTENSION_ID = "custom.remote.python.generic_commands"
+EF2_EXTENSION_ID = "custom:generic-commands"
+
+
+class CompareOperator(Enum):
+    EQUALS = "=="
+    NOT_EQUALS = "!="
+    GREATER_THAN = ">"
+    GREATER_THAN_OR_EQUAL_TO = ">="
+    LESS_THAN = "<"
+    LESS_THAN_OR_EQUAL_TO = "<="
 
 
 def build_authentication_from_ef1(ef1_config: dict):
@@ -52,40 +62,51 @@ def build_ef2_config_from_ef1(
     description: str,
     skip_endpoint_authentication: bool,
     ef1_configurations: pd.DataFrame,
+    merge_commands: bool = False,
 ):
 
     # {
-    #     "os": "Generic Linux",
-    #     "disable_iostat": "false",
-    #     "ssh_key_contents": None,
-    #     "top_threads_mode": "false",
-    #     "log_level": "INFO",
+    #     "report_method": "FRAMEWORK",
+    #     "test_alias": "",
+    #     "api_url": "",
+    #     "second_username": "",
+    #     "ssh_key_contents": null,
+    #     "api_token": null,
+    #     "output_validation_numeric_value": "",
+    #     "metric_pair_delimiter": "",
+    #     "additional_props": "",
+    #     "frequency": "1",
+    #     "hostname": "172.24.20.128",
+    #     "password": null,
+    #     "disable_rsa2": "true",
+    #     "output_validation_numeric_operator": "",
+    #     "alias": "",
+    #     "group": "",
+    #     "second_password": null,
+    #     "log_level": "DEBUG",
     #     "persist_ssh_connection": "true",
-    #     "mounts_to_exclude": "",
-    #     "additional_props": "key=value\ntest=tess1",
+    #     "command": "python -c 'print \"-\\n\" * 101000'",
     #     "ssh_key_file": "",
-    #     "ssh_key_passphrase": None,
-    #     "hostname": "172.26.231.39",
-    #     "password": None,
-    #     "disable_rsa2": "false",
-    #     "fail_on_initial_error": "false",
-    #     "mounts_to_include": ".*\nabc\ndef",
+    #     "ssh_key_passphrase": null,
+    #     "output_validation_pattern": "",
+    #     "fail_on_initial_error": "true",
     #     "port": "22",
-    #     "process_filter": "ssh;SSH",
-    #     "custom_path": "",
-    #     "alias": "ubuntu",
-    #     "max_channel_threads": "5",
+    #     "key_value_delimiter": "",
+    #     "location": "",
     #     "username": "jpwk",
-    #     "group": "testing",
+    #     "output_evaluation_behavior": "TEXT_PATTERN_MATCH"
     # }
 
     base_config = {
         "enabled": False,
         "description": description,
         "version": version,
-        "featureSets": ["default"],
+        # "featureSets": ["default"],
         "pythonRemote": {"endpoints": []},
     }
+
+    if merge_commands:
+        hostname_merged_commands = {}
 
     print(
         f"{len(ef1_configurations)} endpoints will attempt to be added to the monitoring configuration."
@@ -97,12 +118,9 @@ def build_ef2_config_from_ef1(
             "enabled": enabled,
             "hostname": properties.get("hostname"),
             "port": int(properties.get("port")),
-            "alias": properties.get("alias"),
-            "os": properties.get("os"),
+            "host_alias": properties.get("alias"),
             "additional_properties": [],
-            "top_processes": {"top_count": 10, "report_log_events": False},
-            "process_filters": [],
-            "mount_filters": [],
+            "commands": [],
             "advanced": {
                 "persist_ssh_connection": (
                     "REUSE"
@@ -112,25 +130,10 @@ def build_ef2_config_from_ef1(
                 "disable_rsa2": (
                     "DISABLE" if bool(properties.get("disable_rsa2")) else "ENABLE"
                 ),
-                "top_mode": (
-                    "THREADS_MODE"
-                    if bool(properties.get("top_threads_mode"))
-                    else "DEFAULT"
-                ),
-                "max_channel_threads": int(properties.get("max_channel_threads")),
+                "max_channel_threads": int(properties.get("max_channel_threads", 5)),
                 "log_output": False,
             },
         }
-
-        if not skip_endpoint_authentication:
-            endpoint_configuration["authentication"] = build_authentication_from_ef1(
-                properties
-            )
-
-        if properties.get("custom_path", None):
-            endpoint_configuration["advanced"]["custom_path"] = properties[
-                "custom_path"
-            ]
 
         if properties.get("additional_props"):
             for prop in properties.get("additional_props", "").split("\n"):
@@ -139,35 +142,77 @@ def build_ef2_config_from_ef1(
                     {"key": key, "value": value}
                 )
 
-        if properties.get("process_filter"):
-            for process in properties.get("process_filter").split("\n"):
-                pattern, group_key = process.split(";")
-                endpoint_configuration["process_filters"].append(
-                    {"group_key": group_key, "pattern": pattern, "user": None}
+        command = {
+            "command": properties.get("command"),
+            "frequency": (
+                int(properties.get("frequency")) if properties.get("frequency") else 15
+            ),
+            "location": (
+                properties.get("location")
+                if properties.get("location")
+                else "ActiveGate"
+            ),
+            "test_alias": properties.get("test_alias"),
+        }
+
+        if properties.get("report_method") in ["FRAMEWORK", "API"]:
+            command["report_method"] = "METRIC"
+        else:
+            command["report_method"] = "SYNTHETIC"
+
+        run_as_different_user = True if properties.get("second_username") else False
+        command["run_as_different_user"] = run_as_different_user
+        if run_as_different_user:
+            command["second_user"] = properties.get("second_username")
+            command["second_password"] = properties.get("second_password")
+
+        if properties.get("output_evaluation_behavior") == "TEXT_PATTERN_MATCH":
+            command["output_evaluation_behavior"] = "TEXT_PATTERN_MATCH"
+            command["output_validation_pattern"] = properties.get(
+                "output_validation_pattern"
+            )
+        elif properties.get("output_evaluation_behavior") == "NUMERIC_VALUE_COMPARISON":
+            command["output_evaluation_behavior"] = "NUMERIC_VALUE_COMPARISON"
+            command["output_validation_numeric_operator"] = CompareOperator(
+                properties.get("output_validation_numeric_operator")
+            ).name
+            command["output_validation_numeric_value"] = properties.get(
+                "output_validation_numeric_value"
+            )
+        elif properties.get("output_evaluation_behavior") == "SINGLE_VALUE_EXTRACTION":
+            command["output_evaluation_behavior"] = "SINGLE_VALUE_EXTRACTION"
+        elif properties.get("output_evaluation_behavior") == "MULTI_VALUE_EXTRACTION":
+            command["output_evaluation_behavior"] = "MULTI_VALUE_EXTRACTION"
+            command["metric_pair_delimiter"] = properties.get("metric_pair_delimiter")
+            command["key_value_delimiter"] = properties.get("key_value_delimiter")
+
+        endpoint_configuration["commands"] = [command]
+
+        if merge_commands:
+            if not properties.get("hostname") in hostname_merged_commands:
+                hostname_merged_commands[properties["hostname"]] = (
+                    endpoint_configuration  # first hostname config we see is the base
                 )
-
-        if properties.get("mounts_to_include"):
-            for pattern in properties.get("mounts_to_include").split("\n"):
-                endpoint_configuration["mount_filters"].append(
-                    {"filter_type": "include", "pattern": pattern}
+            else:
+                hostname_merged_commands[properties.get("hostname")]["commands"].append(
+                    command
                 )
+        else:
+            base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
 
-        if properties.get("mounts_to_exclude"):
-            for pattern in properties.get("mounts_to_exclude").split("\n"):
-                endpoint_configuration["mount_filters"].append(
-                    {"filter_type": "exclude", "pattern": pattern}
-                )
-
-        base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
-
+    if merge_commands:
+        for host in hostname_merged_commands:
+            base_config["pythonRemote"]["endpoints"].append(
+                hostname_merged_commands[host]
+            )
     return base_config
 
 
-@app.command(help="Pull EF1 remote unix configurations into a spreadsheet.")
+@app.command(help="Pull EF1 generic commands configurations into a spreadsheet.")
 def pull(
     dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
     dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
-    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}.xlsx",
+    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}-export.xlsx",
     index: Annotated[
         Optional[List[str]],
         typer.Option(
@@ -184,7 +229,7 @@ def pull(
         full_config = config.json()
         properties = full_config.get("properties", {})
         for key in properties:
-            if key in index or key == "username":
+            if key in index or key in ["username"]:
                 full_config.update({key: properties[key]})
         full_config["properties"] = json.dumps(properties)
         full_configs.append(full_config)
@@ -227,6 +272,12 @@ def push(
             help="The version of the EF2 extension you would look to create this configuration for"
         ),
     ],
+    merge_commands: Annotated[
+        bool,
+        typer.Option(
+            help="Attempt to combine multiple commands against the same host into one endpoint (based on 'hostname' field)"
+        ),
+    ] = False,
     print_json: Annotated[
         bool, typer.Option(help="Print the configuration json that will be sent")
     ] = False,
@@ -238,12 +289,12 @@ def push(
     ] = False,
 ):
     """
-    Convert and push the EF1 remote unix configurations to the EF2 extension.
+    Convert and push the EF1 generic commands configurations to the EF2 unsigned generic commands extension.
     """
     xls = pd.ExcelFile(input_file)
     df = pd.read_excel(xls, sheet)
 
-    config = build_ef2_config_from_ef1(version, sheet, False, df)
+    config = build_ef2_config_from_ef1(version, sheet, False, df, merge_commands)
     if print_json:
         print(json.dumps(config))
 
@@ -255,7 +306,6 @@ def push(
 
     dt = Dynatrace(dt_url, dt_token, print_bodies=False)
     config = MonitoringConfigurationDto(ag_group, config)
-
     if not do_not_create:
         try:
             result = dt.extensions_v2.post_monitoring_configurations(

@@ -1,4 +1,5 @@
 import dt_extension_migrator.extension_apps.generic_commands
+import dt_extension_migrator.extension_apps.remote_logs
 import typer
 from typing_extensions import Annotated
 from dynatrace import Dynatrace
@@ -15,6 +16,7 @@ app.add_typer(dt_extension_migrator.extension_apps.remote_unix.app, name="remote
 app.add_typer(
     dt_extension_migrator.extension_apps.generic_commands.app, name="generic-commands"
 )
+app.add_typer(dt_extension_migrator.extension_apps.remote_logs.app, name="remote-logs")
 
 SUPPORTED_EF1_EXTENSION_MAPPINGS = {
     "custom.remote.python.remote_agent": "com.dynatrace.extension.remote-unix",

@@ -11,8 +11,8 @@ from typing import Optional, List
 
 app = typer.Typer()
 
-EF1_EXTENSION_ID = "custom.remote.python.remote_agent"
-EF2_EXTENSION_ID = "custom:remote-unix"
+EF1_EXTENSION_ID = "custom.remote.python.remote_logs"
+EF2_EXTENSION_ID = "com.dynatrace.extension.remote_logs"
 
 
 def build_authentication_from_ef1(ef1_config: dict):
@@ -52,40 +52,19 @@ def build_ef2_config_from_ef1(
     description: str,
     skip_endpoint_authentication: bool,
     ef1_configurations: pd.DataFrame,
+    merge_logs: bool = False,
 ):
-
-    # {
-    #     "os": "Generic Linux",
-    #     "disable_iostat": "false",
-    #     "ssh_key_contents": None,
-    #     "top_threads_mode": "false",
-    #     "log_level": "INFO",
-    #     "persist_ssh_connection": "true",
-    #     "mounts_to_exclude": "",
-    #     "additional_props": "key=value\ntest=tess1",
-    #     "ssh_key_file": "",
-    #     "ssh_key_passphrase": None,
-    #     "hostname": "172.26.231.39",
-    #     "password": None,
-    #     "disable_rsa2": "false",
-    #     "fail_on_initial_error": "false",
-    #     "mounts_to_include": ".*\nabc\ndef",
-    #     "port": "22",
-    #     "process_filter": "ssh;SSH",
-    #     "custom_path": "",
-    #     "alias": "ubuntu",
-    #     "max_channel_threads": "5",
-    #     "username": "jpwk",
-    #     "group": "testing",
-    # }
 
     base_config = {
         "enabled": False,
         "description": description,
         "version": version,
-        "featureSets": ["default"],
+        # "featureSets": ["default"],
         "pythonRemote": {"endpoints": []},
     }
+
+    if merge_logs:
+        hostname_merged_logs = {}
 
     print(
         f"{len(ef1_configurations)} endpoints will attempt to be added to the monitoring configuration."
@@ -97,12 +76,10 @@ def build_ef2_config_from_ef1(
             "enabled": enabled,
             "hostname": properties.get("hostname"),
             "port": int(properties.get("port")),
-            "alias": properties.get("alias"),
-            "os": properties.get("os"),
+            "host_alias": properties.get("alias"),
             "additional_properties": [],
-            "top_processes": {"top_count": 10, "report_log_events": False},
-            "process_filters": [],
-            "mount_filters": [],
+            "logs_to_monitor": [],
+            "os": properties.get("os"),
             "advanced": {
                 "persist_ssh_connection": (
                     "REUSE"
@@ -112,25 +89,8 @@ def build_ef2_config_from_ef1(
                 "disable_rsa2": (
                     "DISABLE" if bool(properties.get("disable_rsa2")) else "ENABLE"
                 ),
-                "top_mode": (
-                    "THREADS_MODE"
-                    if bool(properties.get("top_threads_mode"))
-                    else "DEFAULT"
-                ),
-                "max_channel_threads": int(properties.get("max_channel_threads")),
-                "log_output": False,
             },
         }
-
-        if not skip_endpoint_authentication:
-            endpoint_configuration["authentication"] = build_authentication_from_ef1(
-                properties
-            )
-
-        if properties.get("custom_path", None):
-            endpoint_configuration["advanced"]["custom_path"] = properties[
-                "custom_path"
-            ]
 
         if properties.get("additional_props"):
             for prop in properties.get("additional_props", "").split("\n"):
@@ -139,39 +99,84 @@ def build_ef2_config_from_ef1(
                     {"key": key, "value": value}
                 )
 
-        if properties.get("process_filter"):
-            for process in properties.get("process_filter").split("\n"):
-                pattern, group_key = process.split(";")
-                endpoint_configuration["process_filters"].append(
-                    {"group_key": group_key, "pattern": pattern, "user": None}
+        log = {
+            "log_directory_path": properties.get("log_directory_path"),
+            "log_pattern": properties.get("log_pattern"),
+            "log_alias": (
+                properties.get("log_alias")
+                if properties.get("log_alias")
+                else properties.get("log_pattern")
+            ),
+            "frequency": 1,
+            "patterns_to_match": [],
+            "patterns_to_exclude": [],
+            "patterns_to_extract": [],
+        }
+
+        report_event_on_match = bool(properties.get("report_event_on_match"))
+        if report_event_on_match:
+            log.update(
+                {
+                    "report_event_on_match": report_event_on_match,
+                    "event_severity": properties.get("event_severity"),
+                    "context_lines": int(properties.get("context_lines")),
+                    "event_prefix": properties.get("event_prefix"),
+                }
+            )
+        else:
+            log.update({"report_event_on_match": report_event_on_match})
+
+        if properties.get("patterns_to_match"):
+            for pattern in properties.get("patterns_to_match").strip().split("\n"):
+                pattern, name = pattern.rsplit(";", 1)
+                log["patterns_to_match"].append({"pattern": pattern, "name": name})
+
+        if properties.get("patterns_to_extract"):
+            for pattern in properties.get("patterns_to_extract").strip().split("\n"):
+                pattern, name = pattern.rsplit(";", 1)
+                if " " in name:
+                    name, aggregation = name.split(" ")
+                    aggregation = aggregation.upper()
+                else:
+                    aggregation = "SUM"
+                log["patterns_to_extract"].append(
+                    {"pattern": pattern, "name": name, "aggregation": aggregation}
                 )
 
-        if properties.get("mounts_to_include"):
-            for pattern in properties.get("mounts_to_include").split("\n"):
-                endpoint_configuration["mount_filters"].append(
-                    {"filter_type": "include", "pattern": pattern}
+        if properties.get("patterns_to_exclude"):
+            for pattern in properties.get("patterns_to_exclude").strip().split("\n"):
+                log["patterns_to_exclude"].append(pattern)
+
+        endpoint_configuration["logs_to_monitor"] = [log]
+
+        if merge_logs:
+            if not properties.get("hostname") in hostname_merged_logs:
+                hostname_merged_logs[properties["hostname"]] = endpoint_configuration
+            else:
+                print(
+                    f"Endpoint {row['endpointId']} beng added to merged log host {properties['hostname']}"
                 )
+                hostname_merged_logs[properties.get("hostname")][
+                    "logs_to_monitor"
+                ].append(log)
+        else:
+            base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
 
-        if properties.get("mounts_to_exclude"):
-            for pattern in properties.get("mounts_to_exclude").split("\n"):
-                endpoint_configuration["mount_filters"].append(
-                    {"filter_type": "exclude", "pattern": pattern}
-                )
-
-        base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
-
+    if merge_logs:
+        for host in hostname_merged_logs:
+            base_config["pythonRemote"]["endpoints"].append(hostname_merged_logs[host])
     return base_config
 
 
-@app.command(help="Pull EF1 remote unix configurations into a spreadsheet.")
+@app.command(help="Pull EF1 remote logs configurations into a spreadsheet.")
 def pull(
     dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
     dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
-    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}.xlsx",
+    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}-export.xlsx",
     index: Annotated[
         Optional[List[str]],
         typer.Option(
-            help="Specify what property to group sheets by. Can be specified multipl times."
+            help="Specify what property to group sheets by. Can be specified multiple times."
         ),
     ] = ["group"],
 ):
@@ -184,7 +189,7 @@ def pull(
         full_config = config.json()
         properties = full_config.get("properties", {})
         for key in properties:
-            if key in index or key == "username":
+            if key in index or key in ["username"]:
                 full_config.update({key: properties[key]})
         full_config["properties"] = json.dumps(properties)
         full_configs.append(full_config)
@@ -227,6 +232,12 @@ def push(
             help="The version of the EF2 extension you would look to create this configuration for"
         ),
     ],
+    merge_logs: Annotated[
+        bool,
+        typer.Option(
+            help="Attempt to combine multiple log analyses against the same host into one endpoint (based on 'hostname' field)"
+        ),
+    ] = False,
     print_json: Annotated[
         bool, typer.Option(help="Print the configuration json that will be sent")
     ] = False,
@@ -238,12 +249,12 @@ def push(
     ] = False,
 ):
     """
-    Convert and push the EF1 remote unix configurations to the EF2 extension.
+    Convert and push the EF1 remote logs configurations to the EF2 extension.
     """
     xls = pd.ExcelFile(input_file)
     df = pd.read_excel(xls, sheet)
 
-    config = build_ef2_config_from_ef1(version, sheet, False, df)
+    config = build_ef2_config_from_ef1(version, sheet, False, df, merge_logs)
     if print_json:
         print(json.dumps(config))
 
