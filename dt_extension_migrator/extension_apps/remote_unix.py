@@ -9,13 +9,18 @@ from rich import print
 import json
 import math
 from typing import Optional, List
+import re
 
-from dt_extension_migrator.remote_unix_utils import build_dt_custom_device_id, build_dt_group_id, dt_murmur3
+from dt_extension_migrator.remote_unix_utils import (
+    build_dt_custom_device_id,
+    build_dt_group_id,
+    dt_murmur3,
+)
 
 app = typer.Typer()
 
 EF1_EXTENSION_ID = "custom.remote.python.remote_agent"
-EF2_EXTENSION_ID = "custom:remote-unix"
+EF2_EXTENSION_ID = "com.dynatrace.extension.remote-unix"
 
 
 def build_authentication_from_ef1(ef1_config: dict):
@@ -94,74 +99,83 @@ def build_ef2_config_from_ef1(
         f"{len(ef1_configurations)} endpoints will attempt to be added to the monitoring configuration."
     )
     for index, row in ef1_configurations.iterrows():
-        enabled = row["enabled"]
-        properties: dict = json.loads(row["properties"])
-        endpoint_configuration = {
-            "enabled": enabled,
-            "hostname": properties.get("hostname"),
-            "port": int(properties.get("port")),
-            "alias": properties.get("alias"),
-            "os": properties.get("os"),
-            "additional_properties": [],
-            "top_processes": {"top_count": 10, "report_log_events": False},
-            "process_filters": [],
-            "mount_filters": [],
-            "advanced": {
-                "persist_ssh_connection": (
-                    "REUSE"
-                    if properties.get("persist_ssh_connection")  == "true"
-                    else "RECREATE"
-                ),
-                "disable_rsa2": (
-                    "DISABLE" if properties.get("disable_rsa2") == "true" else "ENABLE"
-                ),
-                "top_mode": (
-                    "THREADS_MODE"
-                    if properties.get("top_threads_mode") == "true"
-                    else "DEFAULT"
-                ),
-                "max_channel_threads": int(properties.get("max_channel_threads")),
-                "log_output": False,
-            },
-        }
+        try:
+            enabled = row["enabled"]
+            properties: dict = json.loads(row["properties"])
+            endpoint_configuration = {
+                "enabled": enabled,
+                "hostname": properties.get("hostname"),
+                "port": int(properties.get("port")),
+                "alias": properties.get("alias"),
+                "os": properties.get("os"),
+                "additional_properties": [],
+                "top_processes": {"top_count": 10, "report_log_events": False},
+                "process_filters": [],
+                "mount_filters": [],
+                "advanced": {
+                    "persist_ssh_connection": (
+                        "REUSE"
+                        if properties.get("persist_ssh_connection") == "true"
+                        else "RECREATE"
+                    ),
+                    "disable_rsa2": (
+                        "DISABLE"
+                        if properties.get("disable_rsa2") == "true"
+                        else "ENABLE"
+                    ),
+                    "top_mode": (
+                        "THREADS_MODE"
+                        if properties.get("top_threads_mode") == "true"
+                        else "DEFAULT"
+                    ),
+                    "max_channel_threads": int(
+                        properties.get("max_channel_threads", 5)
+                    ),
+                    "log_output": False,
+                },
+            }
 
-        if not skip_endpoint_authentication:
-            endpoint_configuration["authentication"] = build_authentication_from_ef1(
-                properties
-            )
-
-        if properties.get("custom_path", None):
-            endpoint_configuration["advanced"]["custom_path"] = properties[
-                "custom_path"
-            ]
-
-        if properties.get("additional_props"):
-            for prop in properties.get("additional_props", "").split("\n"):
-                key, value = prop.split("=")
-                endpoint_configuration["additional_properties"].append(
-                    {"key": key, "value": value}
+            if not skip_endpoint_authentication:
+                endpoint_configuration["authentication"] = (
+                    build_authentication_from_ef1(properties)
                 )
 
-        if properties.get("process_filter"):
-            for process in properties.get("process_filter").split("\n"):
-                pattern, group_key = process.split(";")
-                endpoint_configuration["process_filters"].append(
-                    {"group_key": group_key, "pattern": pattern, "user": None}
-                )
+            if properties.get("custom_path", None):
+                endpoint_configuration["advanced"]["custom_path"] = properties[
+                    "custom_path"
+                ]
 
-        if properties.get("mounts_to_include"):
-            for pattern in properties.get("mounts_to_include").split("\n"):
-                endpoint_configuration["mount_filters"].append(
-                    {"filter_type": "include", "pattern": pattern}
-                )
+            if properties.get("additional_props"):
+                for prop in properties.get("additional_props", "").split("\n"):
+                    key, value = prop.split("=")
+                    endpoint_configuration["additional_properties"].append(
+                        {"key": key, "value": value}
+                    )
 
-        if properties.get("mounts_to_exclude"):
-            for pattern in properties.get("mounts_to_exclude").split("\n"):
-                endpoint_configuration["mount_filters"].append(
-                    {"filter_type": "exclude", "pattern": pattern}
-                )
+            if properties.get("process_filter"):
+                for process in properties.get("process_filter").split("\n"):
+                    pattern, group_key = process.split(";")
+                    endpoint_configuration["process_filters"].append(
+                        {"group_key": group_key, "pattern": pattern, "user": None}
+                    )
 
-        base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
+            if properties.get("mounts_to_include"):
+                for pattern in properties.get("mounts_to_include").split("\n"):
+                    endpoint_configuration["mount_filters"].append(
+                        {"filter_type": "include", "pattern": pattern}
+                    )
+
+            if properties.get("mounts_to_exclude"):
+                for pattern in properties.get("mounts_to_exclude").split("\n"):
+                    endpoint_configuration["mount_filters"].append(
+                        {"filter_type": "exclude", "pattern": pattern}
+                    )
+
+            base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
+
+        except Exception as e:
+            print(f"Error parsing config: {e}")
+            print(properties)
 
     return base_config
 
@@ -179,7 +193,7 @@ def pull(
     ] = ["group"],
 ):
     dt = Dynatrace(dt_url, dt_token)
-    configs = dt.extensions.list_instances(extension_id=EF1_EXTENSION_ID)
+    configs = list(dt.extensions.list_instances(extension_id=EF1_EXTENSION_ID))
     full_configs = []
 
     count = 0
@@ -188,13 +202,19 @@ def pull(
         full_config = config.json()
         properties = full_config.get("properties", {})
 
-        alias = properties.get("alias") if properties.get("alias") else properties.get("hostname")
+        alias = (
+            properties.get("alias")
+            if properties.get("alias")
+            else properties.get("hostname")
+        )
         group_id = dt_murmur3(build_dt_group_id(properties.get("group"), ""))
 
-        ef1_custom_device_id = f"CUSTOM_DEVICE-{dt_murmur3(build_dt_custom_device_id(group_id, alias))}"
+        ef1_custom_device_id = (
+            f"CUSTOM_DEVICE-{dt_murmur3(build_dt_custom_device_id(group_id, alias))}"
+        )
         full_config.update({"ef1_device_id": ef1_custom_device_id})
 
-        ef2_entity_selector = f"type(remote_unix:host),alias(\"{alias}\")"
+        ef2_entity_selector = f'type(remote_unix:host),alias("{alias}")'
         full_config.update({"ef2_entity_selector": ef2_entity_selector})
 
         full_config.update({"ef1_page": math.ceil((count + 1) / 15)})
@@ -205,8 +225,12 @@ def pull(
         full_config["properties"] = json.dumps(properties)
         full_configs.append(full_config)
 
-        count+=1
+        print(f"Adding {alias}...")
 
+        count += 1
+
+    print("Finished pulling configs...")
+    print("Adding data to document...")
     writer = pd.ExcelWriter(
         output_file,
         engine="xlsxwriter",
@@ -215,9 +239,13 @@ def pull(
     df_grouped = df.groupby(index)
     for key, group in df_grouped:
         key = [subgroup for subgroup in key if subgroup]
-        group.to_excel(
-            writer, sheet_name="-".join(key) or "Default", index=False, header=True
-        )
+        sheet_name = "-".join(key)
+        sheet_name = re.sub(r"[\[\]\:\*\?\/\\\s]", "_", sheet_name)
+        if len(sheet_name) >= 31:
+            sheet_name = sheet_name[:31]
+        group.to_excel(writer, sheet_name or "Default", index=False, header=True)
+
+    print("Closing document...")
     writer.close()
     print(f"Exported configurations available in '{output_file}'")
 
@@ -261,7 +289,7 @@ def push(
     xls = pd.ExcelFile(input_file)
     df = pd.read_excel(xls, sheet)
 
-    config = build_ef2_config_from_ef1(version, sheet, False, df)
+    config = build_ef2_config_from_ef1(version, sheet, True, df)
     if print_json:
         print(json.dumps(config))
 
