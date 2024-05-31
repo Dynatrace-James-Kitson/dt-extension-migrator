@@ -78,99 +78,108 @@ def build_ef2_config_from_ef1(
         f"{len(ef1_configurations)} endpoints will attempt to be added to the monitoring configuration."
     )
     for index, row in ef1_configurations.iterrows():
-        enabled = row["enabled"]
-        properties: dict = json.loads(row["properties"])
-        endpoint_configuration = {
-            "enabled": enabled,
-            "hostname": properties.get("hostname"),
-            "port": int(properties.get("port")),
-            "host_alias": properties.get("alias"),
-            "additional_properties": [],
-            "logs_to_monitor": [],
-            "os": properties.get("os"),
-            "advanced": {
-                "persist_ssh_connection": (
-                    "REUSE"
-                    if properties.get("persist_ssh_connection") == "true"
-                    else "RECREATE"
+        try:
+            enabled = row["enabled"]
+            properties: dict = json.loads(row["properties"])
+            endpoint_configuration = {
+                "enabled": enabled,
+                "hostname": properties.get("hostname"),
+                "port": int(properties.get("port")),
+                "host_alias": properties.get("alias"),
+                "additional_properties": [],
+                "logs_to_monitor": [],
+                "os": properties.get("os"),
+                "advanced": {
+                    "persist_ssh_connection": (
+                        "REUSE"
+                        if properties.get("persist_ssh_connection") == "true"
+                        else "RECREATE"
+                    ),
+                    "disable_rsa2": (
+                        "DISABLE" if properties.get("disable_rsa2") == "true" else "ENABLE"
+                    ),
+                },
+            }
+
+            if properties.get("additional_props"):
+                for prop in properties.get("additional_props", "").split("\n"):
+                    key, value = prop.split("=")
+                    endpoint_configuration["additional_properties"].append(
+                        {"key": key, "value": value}
+                    )
+
+            log = {
+                "log_directory_path": properties.get("log_directory_path"),
+                "log_pattern": properties.get("log_pattern"),
+                "log_alias": (
+                    properties.get("log_alias")
+                    if properties.get("log_alias")
+                    else properties.get("log_pattern")
                 ),
-                "disable_rsa2": (
-                    "DISABLE" if properties.get("disable_rsa2") == "true" else "ENABLE"
-                ),
-            },
-        }
+                "frequency": 1,
+                "patterns_to_match": [],
+                "patterns_to_exclude": [],
+                "patterns_to_extract": [],
+            }
 
-        if properties.get("additional_props"):
-            for prop in properties.get("additional_props", "").split("\n"):
-                key, value = prop.split("=")
-                endpoint_configuration["additional_properties"].append(
-                    {"key": key, "value": value}
-                )
-
-        log = {
-            "log_directory_path": properties.get("log_directory_path"),
-            "log_pattern": properties.get("log_pattern"),
-            "log_alias": (
-                properties.get("log_alias")
-                if properties.get("log_alias")
-                else properties.get("log_pattern")
-            ),
-            "frequency": 1,
-            "patterns_to_match": [],
-            "patterns_to_exclude": [],
-            "patterns_to_extract": [],
-        }
-
-        report_event_on_match = (
-            True if properties.get("report_event_on_match") == "true" else False
-        )
-        if report_event_on_match:
-            log.update(
-                {
-                    "report_event_on_match": report_event_on_match,
-                    "event_severity": properties.get("event_severity"),
-                    "context_lines": int(properties.get("context_lines")),
-                    "event_prefix": properties.get("event_prefix"),
-                }
+            report_event_on_match = (
+                True if properties.get("report_event_on_match") == "true" else False
             )
-        else:
-            log.update({"report_event_on_match": report_event_on_match})
-
-        if properties.get("patterns_to_match"):
-            for pattern in properties.get("patterns_to_match").strip().split("\n"):
-                pattern, name = pattern.rsplit(";", 1)
-                log["patterns_to_match"].append({"pattern": pattern, "name": name})
-
-        if properties.get("patterns_to_extract"):
-            for pattern in properties.get("patterns_to_extract").strip().split("\n"):
-                pattern, name = pattern.rsplit(";", 1)
-                if " " in name:
-                    name, aggregation = name.split(" ")
-                    aggregation = aggregation.upper()
-                else:
-                    aggregation = "SUM"
-                log["patterns_to_extract"].append(
-                    {"pattern": pattern, "name": name, "aggregation": aggregation}
+            if report_event_on_match:
+                log.update(
+                    {
+                        "report_event_on_match": report_event_on_match,
+                        "event_severity": properties.get("event_severity"),
+                        "context_lines": int(properties.get("context_lines")),
+                        "event_prefix": properties.get("event_prefix"),
+                    }
                 )
-
-        if properties.get("patterns_to_exclude"):
-            for pattern in properties.get("patterns_to_exclude").strip().split("\n"):
-                log["patterns_to_exclude"].append(pattern)
-
-        endpoint_configuration["logs_to_monitor"] = [log]
-
-        if merge_logs:
-            if not properties.get("hostname") in hostname_merged_logs:
-                hostname_merged_logs[properties["hostname"]] = endpoint_configuration
             else:
-                print(
-                    f"Endpoint {row['endpointId']} beng added to merged log host {properties['hostname']}"
-                )
-                hostname_merged_logs[properties.get("hostname")][
-                    "logs_to_monitor"
-                ].append(log)
-        else:
-            base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
+                log.update({"report_event_on_match": report_event_on_match})
+
+            if properties.get("patterns_to_match"):
+                for pattern in properties.get("patterns_to_match").strip().split("\n"):
+                    if len(pattern.rsplit(";", 1)) == 1:
+                        pattern, name = pattern, pattern
+                        print(f"Warning: configuration \"{row.get("endpointName")}\" had an incorrect pattern match configuration and will attempt to be corrected in the new configuration. Please review.")
+                    else:
+                        pattern, name = pattern.rsplit(";", 1)
+                    log["patterns_to_match"].append({"pattern": pattern, "name": name})
+
+            if properties.get("patterns_to_extract"):
+                for pattern in properties.get("patterns_to_extract").strip().split("\n"):
+                    pattern, name = pattern.rsplit(";", 1)
+                    if " " in name:
+                        name, aggregation = name.split(" ")
+                        aggregation = aggregation.upper()
+                    else:
+                        aggregation = "SUM"
+                    log["patterns_to_extract"].append(
+                        {"pattern": pattern, "name": name, "aggregation": aggregation}
+                    )
+
+            if properties.get("patterns_to_exclude"):
+                for pattern in properties.get("patterns_to_exclude").strip().split("\n"):
+                    log["patterns_to_exclude"].append(pattern)
+
+            endpoint_configuration["logs_to_monitor"] = [log]
+
+            if merge_logs:
+                if not properties.get("hostname") in hostname_merged_logs:
+                    hostname_merged_logs[properties["hostname"]] = endpoint_configuration
+                else:
+                    print(
+                        f"Endpoint {row['endpointId']} beng added to merged log host {properties['hostname']}"
+                    )
+                    hostname_merged_logs[properties.get("hostname")][
+                        "logs_to_monitor"
+                    ].append(log)
+            else:
+                base_config["pythonRemote"]["endpoints"].append(endpoint_configuration)
+        
+        except Exception as e:
+            print(f"Error parsing config: {e}")
+            print(properties)
 
     if merge_logs:
         for host in hostname_merged_logs:
