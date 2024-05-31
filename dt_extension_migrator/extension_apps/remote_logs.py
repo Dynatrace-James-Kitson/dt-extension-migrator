@@ -140,8 +140,8 @@ def build_ef2_config_from_ef1(
             if properties.get("patterns_to_match"):
                 for pattern in properties.get("patterns_to_match").strip().split("\n"):
                     if len(pattern.rsplit(";", 1)) == 1:
+                        print(f"[bold yellow]Warning: configuration \"{row.get("endpointName")}\" had an incorrect pattern match configuration (likely a missing pattern key) and will attempt to be corrected in the new configuration. Please review: \"{pattern}\"[/bold yellow]")
                         pattern, name = pattern, pattern
-                        print(f"Warning: configuration \"{row.get("endpointName")}\" had an incorrect pattern match configuration and will attempt to be corrected in the new configuration. Please review.")
                     else:
                         pattern, name = pattern.rsplit(";", 1)
                     log["patterns_to_match"].append({"pattern": pattern, "name": name})
