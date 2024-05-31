@@ -8,7 +8,10 @@ from rich import print
 
 import json
 from typing import Optional, List
+import math
 from enum import Enum
+
+from dt_extension_migrator.remote_unix_utils import build_dt_custom_device_id, build_dt_group_id, dt_murmur3
 
 app = typer.Typer()
 
@@ -124,11 +127,11 @@ def build_ef2_config_from_ef1(
             "advanced": {
                 "persist_ssh_connection": (
                     "REUSE"
-                    if bool(properties.get("persist_ssh_connection"))
+                    if properties.get("persist_ssh_connection") == "true"
                     else "RECREATE"
                 ),
                 "disable_rsa2": (
-                    "DISABLE" if bool(properties.get("disable_rsa2")) else "ENABLE"
+                    "DISABLE" if properties.get("disable_rsa2")  == "true" else "ENABLE"
                 ),
                 "max_channel_threads": int(properties.get("max_channel_threads", 5)),
                 "log_output": False,
@@ -224,15 +227,30 @@ def pull(
     configs = dt.extensions.list_instances(extension_id=EF1_EXTENSION_ID)
     full_configs = []
 
+    count = 0
     for config in track(configs, description="Pulling EF1 configs"):
         config = config.get_full_configuration(EF1_EXTENSION_ID)
         full_config = config.json()
         properties = full_config.get("properties", {})
+
+        alias = properties.get("alias") if properties.get("alias") else properties.get("hostname")
+        group_id = dt_murmur3(build_dt_group_id(properties.get("group"), ""))
+
+        ef1_custom_device_id = f"CUSTOM_DEVICE-{dt_murmur3(build_dt_custom_device_id(group_id, alias))}"
+        full_config.update({"ef1_device_id": ef1_custom_device_id})
+
+        ef2_entity_selector = f"type(remote_unix:host),alias(\"{alias}\")"
+        full_config.update({"ef2_entity_selector": ef2_entity_selector})
+
+        full_config.update({"ef1_page": math.ceil((count + 1) / 15)})
+
         for key in properties:
             if key in index or key in ["username"]:
                 full_config.update({key: properties[key]})
         full_config["properties"] = json.dumps(properties)
         full_configs.append(full_config)
+
+        count += 1
 
     writer = pd.ExcelWriter(
         output_file,
@@ -300,7 +318,7 @@ def push(
 
     if not ag_group.startswith("ag_group-"):
         print(
-            f"Appending 'ag_group-' to provided hostname. Result: 'ag_group-{ag_group}'"
+            f"Appending 'ag_group-' to provided group name. Result: 'ag_group-{ag_group}'"
         )
         ag_group = f"ag_group-{ag_group}"
 

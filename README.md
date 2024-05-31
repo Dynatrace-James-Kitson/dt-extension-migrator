@@ -39,6 +39,10 @@ Once you have the spreadsheet generated you can use this to convert and push the
 
 `dt-ext-migrator remote-unix push --input-file .\custom.remote.python.remote_agent-export.xlsx --sheet group1-myuser --version 1.0.0 --ag-group ag_group-default`
 
+### Tips:
+ - The --ag-group option can be specified with or without the leading `ag_group-` prefix
+ - Fields you should review/update manually will be the authentication (top-level monitoring configuration level is recommended) and the top-level 'group' setting if used
+
 A summary will be printed after a successful push. E.g.:
 ```
 2 endpoints will attempt to be added to the monitoring configuration.
