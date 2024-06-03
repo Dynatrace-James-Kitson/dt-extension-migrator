@@ -140,7 +140,7 @@ def build_ef2_config_from_ef1(
             if properties.get("patterns_to_match"):
                 for pattern in properties.get("patterns_to_match").strip().split("\n"):
                     if len(pattern.rsplit(";", 1)) == 1:
-                        print(f"[bold yellow]Warning: configuration \"{row.get("endpointName")}\" had an incorrect pattern match configuration (likely a missing pattern key) and will attempt to be corrected in the new configuration. Please review: \"{pattern}\"[/bold yellow]")
+                        print(f"[bold yellow]Warning: configuration \"{row.get('endpointName')}\" had an incorrect pattern match configuration (likely a missing pattern key) and will attempt to be corrected in the new configuration. Please review: \"{pattern}\"[/bold yellow]")
                         pattern, name = pattern, pattern
                     else:
                         pattern, name = pattern.rsplit(";", 1)
@@ -224,7 +224,7 @@ def pull(
         ef2_entity_selector = f'type(remote_unix:host),alias("{alias}")'
         full_config.update({"ef2_entity_selector": ef2_entity_selector})
 
-        full_config.update({"ef1_page": math.ceil((count + 1) / 15)})
+        full_config.update({"ef1_page": math.ceil((count + 1) / 15), "ef1_group_id": f"CUSTOM_DEVICE_GROUP-{group_id}"})
 
         for key in properties:
             if key in index or key in ["username"]:

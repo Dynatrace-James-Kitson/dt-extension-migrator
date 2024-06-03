@@ -21,6 +21,7 @@ app = typer.Typer()
 
 EF1_EXTENSION_ID = "custom.remote.python.remote_agent"
 EF2_EXTENSION_ID = "com.dynatrace.extension.remote-unix"
+# EF2_EXTENSION_ID = "custom:remote-unix"
 
 
 def build_authentication_from_ef1(ef1_config: dict):
@@ -217,7 +218,7 @@ def pull(
         ef2_entity_selector = f'type(remote_unix:host),alias("{alias}")'
         full_config.update({"ef2_entity_selector": ef2_entity_selector})
 
-        full_config.update({"ef1_page": math.ceil((count + 1) / 15)})
+        full_config.update({"ef1_page": math.ceil((count + 1) / 15), "ef1_group_id": f"CUSTOM_DEVICE_GROUP-{group_id}"})
 
         for key in properties:
             if key in index or key == "username":

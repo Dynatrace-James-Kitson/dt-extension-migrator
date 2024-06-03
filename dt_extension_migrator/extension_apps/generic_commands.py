@@ -253,7 +253,7 @@ def pull(
         ef2_entity_selector = f'type(remote_unix:host),alias("{alias}")'
         full_config.update({"ef2_entity_selector": ef2_entity_selector})
 
-        full_config.update({"ef1_page": math.ceil((count + 1) / 15)})
+        full_config.update({"ef1_page": math.ceil((count + 1) / 15), "ef1_group_id": f"CUSTOM_DEVICE_GROUP-{group_id}"})
 
         print(f"Adding {alias}...")
 
