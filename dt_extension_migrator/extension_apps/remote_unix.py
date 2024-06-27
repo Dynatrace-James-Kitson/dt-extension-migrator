@@ -3,6 +3,7 @@ from typing_extensions import Annotated
 import pandas as pd
 from dynatrace import Dynatrace
 from dynatrace.environment_v2.extensions import MonitoringConfigurationDto
+from dynatrace.http_client import TOO_MANY_REQUESTS_WAIT
 from rich.progress import track
 from rich import print
 
@@ -10,6 +11,8 @@ import json
 import math
 from typing import Optional, List
 import re
+
+from dt_extension_migrator.logging import logger
 
 from dt_extension_migrator.remote_unix_utils import (
     build_dt_custom_device_id,
@@ -22,6 +25,10 @@ app = typer.Typer()
 EF1_EXTENSION_ID = "custom.remote.python.remote_agent"
 EF2_EXTENSION_ID = "com.dynatrace.extension.remote-unix"
 # EF2_EXTENSION_ID = "custom:remote-unix"
+
+EF1_METRIC_PREFIX = "ext:tech.RemoteAgent."
+
+TIMEOUT = 30
 
 
 def build_authentication_from_ef1(ef1_config: dict):
@@ -181,6 +188,40 @@ def build_ef2_config_from_ef1(
     return base_config
 
 
+@app.command(help="Pull metric events using EF1 remote unix metrics.")
+def pull_events(
+    dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
+    dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
+    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}-metric-event-export.xlsx",
+):
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
+    settings_objects = list(dt.settings.list_objects(
+        "builtin:anomaly-detection.metric-events",
+        filter=f"value.queryDefinition.metricKey contains '{EF1_METRIC_PREFIX}' or value.queryDefinition.metricSelector contains '{EF1_METRIC_PREFIX}'",
+    ))
+
+    object_list = []
+    for settings_object in track(settings_objects):
+        print(settings_object.json())
+        value = settings_object.value
+        object_list.append({**settings_object.value, **value})
+
+    writer = pd.ExcelWriter(
+        output_file,
+        engine="xlsxwriter",
+    )
+    df = pd.DataFrame(object_list)
+    df.to_excel(writer, "metric_events", index=False, header=True)
+    writer.close()
+
+
 @app.command(help="Pull EF1 remote unix configurations into a spreadsheet.")
 def pull(
     dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
@@ -193,7 +234,14 @@ def pull(
         ),
     ] = ["group"],
 ):
-    dt = Dynatrace(dt_url, dt_token)
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
     configs = list(dt.extensions.list_instances(extension_id=EF1_EXTENSION_ID))
     full_configs = []
 
@@ -218,7 +266,12 @@ def pull(
         ef2_entity_selector = f'type(remote_unix:host),alias("{alias}")'
         full_config.update({"ef2_entity_selector": ef2_entity_selector})
 
-        full_config.update({"ef1_page": math.ceil((count + 1) / 15), "ef1_group_id": f"CUSTOM_DEVICE_GROUP-{group_id}"})
+        full_config.update(
+            {
+                "ef1_page": math.ceil((count + 1) / 15),
+                "ef1_group_id": f"CUSTOM_DEVICE_GROUP-{group_id}",
+            }
+        )
 
         for key in properties:
             if key in index or key == "username":
@@ -300,7 +353,14 @@ def push(
         )
         ag_group = f"ag_group-{ag_group}"
 
-    dt = Dynatrace(dt_url, dt_token, print_bodies=False)
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
     config = MonitoringConfigurationDto(ag_group, config)
 
     if not do_not_create:
@@ -319,3 +379,77 @@ def push(
 
 if __name__ == "__main__":
     app()
+
+ef1_to_ef2_key_mappings = {
+    "ext:tech.RemoteAgent.availability": "remote_unix.availability",
+    "ext:tech.RemoteAgent.cpu_utilization": "remote_unix.cpu_utilization",
+    "ext:tech.RemoteAgent.cpu_user": "remote_unix.cpu_user",
+    "ext:tech.RemoteAgent.cpu_system": "remote_unix.cpu_system",
+    "ext:tech.RemoteAgent.cpu_idle": "remote_unix.cpu_idle",
+    "ext:tech.RemoteAgent.waiting_processes": "remote_unix.waiting_processes",
+    "ext:tech.RemoteAgent.paged_in": "remote_unix.paged_in",
+    "ext:tech.RemoteAgent.paged_out": "remote_unix.paged_out",
+    "ext:tech.RemoteAgent.physical_memory_free": "remote_unix.physical_memory_free",
+    "ext:tech.RemoteAgent.physical_memory_used_percent": "remote_unix.physical_memory_used_percent",
+    "ext:tech.RemoteAgent.memory_free": "remote_unix.physical_memory_free",
+    "ext:tech.RemoteAgent.memory_used_percent": "remote_unix.physical_memory_used_percent",
+    "ext:tech.RemoteAgent.swap_free": "remote_unix.swap_free",
+    "ext:tech.RemoteAgent.swap_total": "remote_unix.swap_total",
+    "ext:tech.RemoteAgent.swap_used_percent": "remote_unix.swap_used_percent",
+    "ext:tech.RemoteAgent.swap_free_percent": "remote_unix.swap_free_percent",
+    "ext:tech.RemoteAgent.top_process_cpu": "remote_unix.top_process_cpu",
+    "ext:tech.RemoteAgent.top_process_size": "remote_unix.top_process_size",
+    "ext:tech.RemoteAgent.filtered_process_cpu": "remote_unix.filtered_process_cpu",
+    "ext:tech.RemoteAgent.filtered_process_size": "remote_unix.filtered_process_size",
+    "ext:tech.RemoteAgent.filtered_process_group_cpu": "remote_unix.filtered_process_cpu",
+    "ext:tech.RemoteAgent.filtered_process_group_size": "remote_unix.filtered_process_size",
+    "ext:tech.RemoteAgent.filtered_process_match_count": "remote_unix.filtered_process_matches",
+    "ext:tech.RemoteAgent.filtered_process_thread_match_count": None,
+    "ext:tech.RemoteAgent.filtered_process_pids_changed": "remote_unix.filtered_process_pids_changed",
+    "ext:tech.RemoteAgent.user_count": "remote_unix.users",
+    "ext:tech.RemoteAgent.mount_used": "remote_unix.mount_used",
+    "ext:tech.RemoteAgent.mount_capacity": "remote_unix.mount_capacity",
+    "ext:tech.RemoteAgent.mount_available": "remote_unix.mount_available",
+    "ext:tech.RemoteAgent.network_bytes": {
+        "Outgoing": "remote_unix.network_bytes_sent_count",
+        "Incoming": "remote_unix.network_bytes_received_count",
+    },
+    "ext:tech.RemoteAgent.packets": {
+        "Outgoing": "remote_unix.packets_sent_count",
+        "Incoming": "remote_unix.packets_received_count",
+    },
+    "ext:tech.RemoteAgent.network_errors": {
+        "Outgoing": "remote_unix.network_errors_outgoing_count",
+        "Incoming": "remote_unix.network_errors_incoming_count",
+    },
+    "ext:tech.RemoteAgent.packets_dropped": {
+        "Outgoing": "remote_unix.packets_dropped_outgoing_count",
+        "Incoming": "remote_unix.packets_dropped_incoming_count",
+    },
+    "ext:tech.RemoteAgent.uptime": "remote_unix.uptime",
+    "ext:tech.RemoteAgent.individual_cpu_time_user": "remote_unix.individual_cpu_time_user",
+    "ext:tech.RemoteAgent.individual_cpu_time_system": "remote_unix.individual_cpu_time_system",
+    "ext:tech.RemoteAgent.individual_cpu_time_idle": "remote_unix.individual_cpu_time_idle",
+    "ext:tech.RemoteAgent.individual_cpu_time_iowait": "remote_unix.individual_cpu_time_iowait",
+    "ext:tech.RemoteAgent.disk_read": "remote_unix.disk_read_count",
+    "ext:tech.RemoteAgent.disk_write": "remote_unix.disk_write_count",
+    "ext:tech.RemoteAgent.bytes_per_transfer": "remote_unix.bytes_per_transfer",
+    "ext:tech.RemoteAgent.transfers": "remote_unix.transfers",
+    "ext:tech.RemoteAgent.disk_read_ops": "remote_unix.disk_read_ops",
+    "ext:tech.RemoteAgent.disk_write_ops": "remote_unix.disk_write_ops",
+    "ext:tech.RemoteAgent.load_avg_1_min": "remote_unix.load_avg_1_min",
+    "ext:tech.RemoteAgent.load_avg_5_min": "remote_unix.load_avg_5_min",
+    "ext:tech.RemoteAgent.load_avg_15_min": "remote_unix.load_avg_15_min",
+}
+
+ef1_to_ef2_dimension_mappings = {
+    "Process": "process",
+    "PID": "pid",
+    "Name": "name",
+    "Group": "group",
+    "Mount": "mount",
+    "Interface": "interface",
+    "Direction": None,
+    "Id": "id",
+    "Disk": "disk",
+}

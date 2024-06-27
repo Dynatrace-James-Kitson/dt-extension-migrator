@@ -3,6 +3,7 @@ from typing_extensions import Annotated
 import pandas as pd
 from dynatrace import Dynatrace
 from dynatrace.environment_v2.extensions import MonitoringConfigurationDto
+from dynatrace.http_client import TOO_MANY_REQUESTS_WAIT
 from rich.progress import track
 from rich import print
 
@@ -19,8 +20,12 @@ from dt_extension_migrator.remote_unix_utils import (
 
 app = typer.Typer()
 
+from dt_extension_migrator.logging import logger
+
 EF1_EXTENSION_ID = "custom.remote.python.remote_logs"
 EF2_EXTENSION_ID = "com.dynatrace.extension.remote-logs"
+
+TIMEOUT = 30
 
 
 def build_authentication_from_ef1(ef1_config: dict):
@@ -199,7 +204,7 @@ def pull(
         ),
     ] = ["group"],
 ):
-    dt = Dynatrace(dt_url, dt_token)
+    dt = Dynatrace(dt_url, dt_token, too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT, retries=3, log=logger, timeout=TIMEOUT)
     configs = list(dt.extensions.list_instances(extension_id=EF1_EXTENSION_ID))
     full_configs = []
 
@@ -313,7 +318,7 @@ def push(
         )
         ag_group = f"ag_group-{ag_group}"
 
-    dt = Dynatrace(dt_url, dt_token, print_bodies=False)
+    dt = Dynatrace(dt_url, dt_token, too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT, retries=3, log=logger, timeout=TIMEOUT)
     config = MonitoringConfigurationDto(ag_group, config)
 
     if not do_not_create:
