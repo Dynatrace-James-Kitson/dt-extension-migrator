@@ -1,6 +1,5 @@
 import mmh3
 
-
 def bytes_to_str(data):
     return "".join(chr(c) for c in data)
 

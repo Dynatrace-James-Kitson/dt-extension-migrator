@@ -3,6 +3,8 @@ from typing_extensions import Annotated
 import pandas as pd
 from dynatrace import Dynatrace
 from dynatrace.environment_v2.extensions import MonitoringConfigurationDto
+from dynatrace.configuration_v1.dashboard import Dashboard, DashboardStub
+from dynatrace.environment_v2.settings import SettingsObjectCreate
 from dynatrace.http_client import TOO_MANY_REQUESTS_WAIT
 from rich.progress import track
 from rich import print
@@ -30,6 +32,85 @@ EF1_METRIC_PREFIX = "ext:tech.RemoteAgent."
 
 TIMEOUT = 30
 
+ef1_to_ef2_key_mappings = {
+    "ext:tech.RemoteAgent.availability": "remote_unix.availability",
+    "ext:tech.RemoteAgent.cpu_utilization": "remote_unix.cpu_utilization",
+    "ext:tech.RemoteAgent.cpu_user": "remote_unix.cpu_user",
+    "ext:tech.RemoteAgent.cpu_system": "remote_unix.cpu_system",
+    "ext:tech.RemoteAgent.cpu_idle": "remote_unix.cpu_idle",
+    "ext:tech.RemoteAgent.waiting_processes": "remote_unix.waiting_processes",
+    "ext:tech.RemoteAgent.paged_in": "remote_unix.paged_in",
+    "ext:tech.RemoteAgent.paged_out": "remote_unix.paged_out",
+    "ext:tech.RemoteAgent.physical_memory_free": "remote_unix.physical_memory_free",
+    "ext:tech.RemoteAgent.physical_memory_used_percent": "remote_unix.physical_memory_used_percent",
+    "ext:tech.RemoteAgent.memory_free": "remote_unix.physical_memory_free",
+    "ext:tech.RemoteAgent.memory_used_percent": "remote_unix.physical_memory_used_percent",
+    "ext:tech.RemoteAgent.swap_free": "remote_unix.swap_free",
+    "ext:tech.RemoteAgent.swap_total": "remote_unix.swap_total",
+    "ext:tech.RemoteAgent.swap_used_percent": "remote_unix.swap_used_percent",
+    "ext:tech.RemoteAgent.swap_free_percent": "remote_unix.swap_free_percent",
+    "ext:tech.RemoteAgent.top_process_cpu": "remote_unix.top_process_cpu",
+    "ext:tech.RemoteAgent.top_process_size": "remote_unix.top_process_size",
+    "ext:tech.RemoteAgent.filtered_process_cpu": "remote_unix.filtered_process_cpu",
+    "ext:tech.RemoteAgent.filtered_process_size": "remote_unix.filtered_process_size",
+    "ext:tech.RemoteAgent.filtered_process_group_cpu": "remote_unix.filtered_process_cpu",
+    "ext:tech.RemoteAgent.filtered_process_group_size": "remote_unix.filtered_process_size",
+    "ext:tech.RemoteAgent.filtered_process_match_count": "remote_unix.filtered_process_matches",
+    "ext:tech.RemoteAgent.filtered_process_thread_match_count": None,
+    "ext:tech.RemoteAgent.filtered_process_pids_changed": "remote_unix.filtered_process_pids_changed",
+    "ext:tech.RemoteAgent.user_count": "remote_unix.users",
+    "ext:tech.RemoteAgent.mount_used": "remote_unix.mount_used",
+    "ext:tech.RemoteAgent.mount_capacity": "remote_unix.mount_capacity",
+    "ext:tech.RemoteAgent.mount_available": "remote_unix.mount_available",
+    "ext:tech.RemoteAgent.network_bytes": {
+        "Outgoing": "remote_unix.network_bytes_sent_count",
+        "Incoming": "remote_unix.network_bytes_received_count",
+    },
+    "ext:tech.RemoteAgent.packets": {
+        "Outgoing": "remote_unix.packets_sent_count",
+        "Incoming": "remote_unix.packets_received_count",
+    },
+    "ext:tech.RemoteAgent.network_errors": {
+        "Outgoing": "remote_unix.network_errors_outgoing_count",
+        "Incoming": "remote_unix.network_errors_incoming_count",
+    },
+    "ext:tech.RemoteAgent.packets_dropped": {
+        "Outgoing": "remote_unix.packets_dropped_outgoing_count",
+        "Incoming": "remote_unix.packets_dropped_incoming_count",
+    },
+    "ext:tech.RemoteAgent.uptime": "remote_unix.uptime",
+    "ext:tech.RemoteAgent.individual_cpu_time_user": "remote_unix.individual_cpu_time_user",
+    "ext:tech.RemoteAgent.individual_cpu_time_system": "remote_unix.individual_cpu_time_system",
+    "ext:tech.RemoteAgent.individual_cpu_time_idle": "remote_unix.individual_cpu_time_idle",
+    "ext:tech.RemoteAgent.individual_cpu_time_iowait": "remote_unix.individual_cpu_time_iowait",
+    "ext:tech.RemoteAgent.disk_read": "remote_unix.disk_read_count",
+    "ext:tech.RemoteAgent.disk_write": "remote_unix.disk_write_count",
+    "ext:tech.RemoteAgent.bytes_per_transfer": "remote_unix.bytes_per_transfer",
+    "ext:tech.RemoteAgent.transfers": "remote_unix.transfers",
+    "ext:tech.RemoteAgent.disk_read_ops": "remote_unix.disk_read_ops",
+    "ext:tech.RemoteAgent.disk_write_ops": "remote_unix.disk_write_ops",
+    "ext:tech.RemoteAgent.load_avg_1_min": "remote_unix.load_avg_1_min",
+    "ext:tech.RemoteAgent.load_avg_5_min": "remote_unix.load_avg_5_min",
+    "ext:tech.RemoteAgent.load_avg_15_min": "remote_unix.load_avg_15_min",
+}
+
+ef1_to_ef2_dimension_mappings = {
+    "Process": "process",
+    "PID": "pid",
+    "Name": "name",
+    "Group": "group",
+    "Mount": "mount",
+    "Interface": "interface",
+    "Direction": None,
+    "Id": "id",
+    "Disk": "disk",
+}
+
+def replace_dimension(match: re.Match):
+    if ef1_to_ef2_dimension_mappings.get(match.group(1)):
+        return r"{dims:" + ef1_to_ef2_dimension_mappings.get(match.group(1)) + r"}"
+    else:
+        return ""
 
 def build_authentication_from_ef1(ef1_config: dict):
     authentication = {"username": ef1_config.get("username")}
@@ -61,6 +142,90 @@ def build_authentication_from_ef1(ef1_config: dict):
             }
         )
     return authentication
+
+
+def convert_event(event: dict) -> SettingsObjectCreate:
+
+    config = json.loads(event["full_config"])
+
+    # query definition
+    query_definition = config["value"]["queryDefinition"]
+
+    if query_definition["type"] == "METRIC_KEY":
+        config["value"]["summary"] = f"{event['summary']} - 2.0"
+        dimension_dict = {
+            dim_filter["dimensionKey"]: dim_filter["dimensionValue"]
+            for dim_filter in query_definition["dimensionFilter"]
+        }
+        if query_definition["metricKey"] in ef1_to_ef2_key_mappings:  # network events
+            if query_definition["metricKey"] in [
+                "ext:tech.RemoteAgent.network_bytes",
+                "ext:tech.RemoteAgent.packets",
+                "ext:tech.RemoteAgent.network_errors",
+                "ext:tech.RemoteAgent.packets_dropped",
+            ]:
+                if dimension_dict.get("Direction"):
+                    query_definition["metricKey"] = ef1_to_ef2_key_mappings[
+                        query_definition["metricKey"]
+                    ][dimension_dict["Direction"]]
+                    del query_definition["dimensionFilter"][
+                        list(dimension_dict.keys()).index("Direction")
+                    ]
+                    del dimension_dict["Direction"]
+
+            else:
+                query_definition["metricKey"] = ef1_to_ef2_key_mappings[
+                    query_definition["metricKey"]
+                ]
+
+            for dim_key in dimension_dict:
+                if dim_key == "dt.entity.custom_device":
+                    query_definition["dimensionFilter"][
+                        list(dimension_dict.keys()).index(dim_key)
+                    ]["dimensionKey"] = "dt.entity.remote_unix:host"
+                if dim_key in ef1_to_ef2_dimension_mappings:
+                    query_definition["dimensionFilter"][
+                        list(dimension_dict.keys()).index(dim_key)
+                    ]["dimensionKey"] = ef1_to_ef2_dimension_mappings[dim_key]
+
+            if (
+                query_definition["entityFilter"]["dimensionKey"]
+                == "dt.entity.custom_device"
+            ):
+                query_definition["entityFilter"][
+                    "dimensionKey"
+                ] = "dt.entity.remote_unix:host"
+
+            if query_definition['metricKey'].endswith("count"):
+                query_definition['aggregation'] = "VALUE"
+
+            config["queryDefinition"] = query_definition
+
+            # event template
+            event_template = config['value']['eventTemplate']
+            dim_pattern = r"\{dims\:([^\}++]+)\}"
+            event_template['description'] = re.sub(dim_pattern, replace_dimension, event_template['description'])
+            
+            title = config['value']['eventTemplate']
+            dim_pattern = r"\{dims\:([^\}++]+)\}"
+            event_template['title'] = re.sub(dim_pattern, replace_dimension, event_template['title'])
+
+            print(config)
+
+            return SettingsObjectCreate(
+                schema_id="builtin:anomaly-detection.metric-events",
+                value=config["value"],
+                scope="environment",
+            )
+
+        else:
+            print(f"Unkown key: {query_definition['metricKey']}")
+
+        settings_object = SettingsObjectCreate(schema_id="builtin:anomaly-detection.metric-events", value=config['value'], scope="environment")
+        return settings_object
+
+    else:
+        print(f"Found selector: {query_definition}")
 
 
 def build_ef2_config_from_ef1(
@@ -188,6 +353,90 @@ def build_ef2_config_from_ef1(
     return base_config
 
 
+@app.command(
+    help="Create dashboard using EF2 remote unix metrics based on EF1 metric dashboard."
+)
+def migrate_dashboards(
+    dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
+    dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
+    id: Annotated[
+        Optional[List[str]],
+        typer.Option(
+            help="Specify a dashboard ID to convert. Can be passed multiple times."
+        ),
+    ] = [],
+    tag: Annotated[
+        Optional[List[str]],
+        typer.Option(help="A tag to filter for when finding dashboards to convert."),
+    ] = None,
+    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}-metric-event-export.xlsx",
+):
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
+    dashboard_full_configs: List[Dashboard] = []
+    dashboard_stubs: List[DashboardStub] = []
+    if id and tag:
+        raise Exception("Only use tag or id for filtering.")
+    if id:
+        for id in id:
+            try:
+                dashboard_full_configs.append(dt.dashboards.get(id))
+            except Exception as e:
+                print(f"Error pulling dashboard with id {id}: {e}")
+    elif tag:
+        dashboard_stubs = dt.dashboards.list(tags=tag)
+    else:
+        dashboard_stubs = dt.dashboards.list()
+
+    for stub in track(dashboard_stubs):
+        try:
+            dashboard_full_configs.append(stub.get_full_dashboard())
+        except Exception as e:
+            print(f"Error pulling full config for dashboard with id {stub.id}: {e}")
+
+    for dashboard in dashboard_full_configs:
+        print(dashboard.tiles)
+
+
+@app.command(help="Migrate events to use EF2 metrics and dimensions.")
+def migrate_events(
+    dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
+    dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
+    input_file: Annotated[
+        str,
+        typer.Option(
+            help="The location of a previously pulled/exported list of EF1 remote unix metric events"
+        ),
+    ],
+):
+    xls = pd.ExcelFile(input_file)
+    df = pd.read_excel(xls, "metric_events")
+
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
+
+    events_to_create: List[SettingsObjectCreate] = []
+    for index, event in df.iterrows():
+
+        updated_settings_object = convert_event(event)
+        if updated_settings_object:
+            events_to_create.append(updated_settings_object)
+    
+    print(dt.settings.create_object(validate_only=True, body=events_to_create))
+
+
 @app.command(help="Pull metric events using EF1 remote unix metrics.")
 def pull_events(
     dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
@@ -202,16 +451,74 @@ def pull_events(
         log=logger,
         timeout=TIMEOUT,
     )
-    settings_objects = list(dt.settings.list_objects(
-        "builtin:anomaly-detection.metric-events",
-        filter=f"value.queryDefinition.metricKey contains '{EF1_METRIC_PREFIX}' or value.queryDefinition.metricSelector contains '{EF1_METRIC_PREFIX}'",
-    ))
+    settings_objects = list(
+        dt.settings.list_objects(
+            "builtin:anomaly-detection.metric-events",
+            filter=f"value.queryDefinition.metricKey contains '{EF1_METRIC_PREFIX}' or value.queryDefinition.metricSelector contains '{EF1_METRIC_PREFIX}'",
+        )
+    )
 
     object_list = []
     for settings_object in track(settings_objects):
-        print(settings_object.json())
         value = settings_object.value
-        object_list.append({**settings_object.value, **value})
+
+        entity_filter_conditions = 0
+        tag_conditions = 0
+        management_zone_conditions = 0
+        name_filter_conditions = 0
+        other_conditions = 0
+        # matching_entities_tags = 0
+
+        # if value['queryDefinition'].get("entityFilter"):
+        #     entity_filter_conditions = len(value['queryDefinition']['entityFilter']['conditions'])
+        #     for condition in value['queryDefinition']['entityFilter']['conditions']:
+        #         if condition['type'] == "TAG":
+        #             tag_conditions += 1
+        #             selector = f'type(CUSTOM_DEVICE),tag({condition['value']})'
+        #             matching_entities_tags += len(list(dt.entities.list(entity_selector=selector, time_from="now-1M")))
+        #         elif condition['type'] == "MANAGEMENT_ZONE":
+        #             management_zone_conditions += 1
+        #             selector = f'type(CUSTOM_DEVICE),managmentZone'
+
+        selector = f"type(CUSTOM_DEVICE)"
+        matching_entity_count = 0
+
+        try:
+            if value['queryDefinition'].get("entityFilter"):
+                for condition in value['queryDefinition']['entityFilter']['conditions']:
+                    entity_filter_conditions += 1
+                    if condition['type'] == "TAG":
+                        tag_conditions += 1
+                        selector += f",tag({condition['value']})"
+                    elif condition['type'] == "MANAGEMENT_ZONE":
+                        management_zone_conditions += 1
+                        selector += f",mzId({condition['value']})"
+                    elif condition['type'] == "NAME":
+                        name_filter_conditions += 1
+                        selector += f",entityName.startsWith({condition['value']})"
+                    else:
+                        other_conditions += 1
+                
+                matching_entities = dt.entities.list(entity_selector=selector)
+    
+                entity_names = ", ".join([e.display_name for e in matching_entities])
+                print(entity_names)
+                matching_entity_count = len(list(matching_entities))
+        except Exception as e:
+            print(f"Warning: {e}")
+        
+        object_list.append(
+            {
+                **settings_object.value,
+                **value,
+                "full_config": json.dumps(settings_object.json()),
+                "number_of_entity_filters": entity_filter_conditions,
+                "number_of_mz_filters": management_zone_conditions,
+                "number_of_other_conditions": other_conditions,
+                "matching_entity_count": matching_entity_count,
+                "matching_entities": entity_names
+            }
+        )
 
     writer = pd.ExcelWriter(
         output_file,
@@ -379,77 +686,3 @@ def push(
 
 if __name__ == "__main__":
     app()
-
-ef1_to_ef2_key_mappings = {
-    "ext:tech.RemoteAgent.availability": "remote_unix.availability",
-    "ext:tech.RemoteAgent.cpu_utilization": "remote_unix.cpu_utilization",
-    "ext:tech.RemoteAgent.cpu_user": "remote_unix.cpu_user",
-    "ext:tech.RemoteAgent.cpu_system": "remote_unix.cpu_system",
-    "ext:tech.RemoteAgent.cpu_idle": "remote_unix.cpu_idle",
-    "ext:tech.RemoteAgent.waiting_processes": "remote_unix.waiting_processes",
-    "ext:tech.RemoteAgent.paged_in": "remote_unix.paged_in",
-    "ext:tech.RemoteAgent.paged_out": "remote_unix.paged_out",
-    "ext:tech.RemoteAgent.physical_memory_free": "remote_unix.physical_memory_free",
-    "ext:tech.RemoteAgent.physical_memory_used_percent": "remote_unix.physical_memory_used_percent",
-    "ext:tech.RemoteAgent.memory_free": "remote_unix.physical_memory_free",
-    "ext:tech.RemoteAgent.memory_used_percent": "remote_unix.physical_memory_used_percent",
-    "ext:tech.RemoteAgent.swap_free": "remote_unix.swap_free",
-    "ext:tech.RemoteAgent.swap_total": "remote_unix.swap_total",
-    "ext:tech.RemoteAgent.swap_used_percent": "remote_unix.swap_used_percent",
-    "ext:tech.RemoteAgent.swap_free_percent": "remote_unix.swap_free_percent",
-    "ext:tech.RemoteAgent.top_process_cpu": "remote_unix.top_process_cpu",
-    "ext:tech.RemoteAgent.top_process_size": "remote_unix.top_process_size",
-    "ext:tech.RemoteAgent.filtered_process_cpu": "remote_unix.filtered_process_cpu",
-    "ext:tech.RemoteAgent.filtered_process_size": "remote_unix.filtered_process_size",
-    "ext:tech.RemoteAgent.filtered_process_group_cpu": "remote_unix.filtered_process_cpu",
-    "ext:tech.RemoteAgent.filtered_process_group_size": "remote_unix.filtered_process_size",
-    "ext:tech.RemoteAgent.filtered_process_match_count": "remote_unix.filtered_process_matches",
-    "ext:tech.RemoteAgent.filtered_process_thread_match_count": None,
-    "ext:tech.RemoteAgent.filtered_process_pids_changed": "remote_unix.filtered_process_pids_changed",
-    "ext:tech.RemoteAgent.user_count": "remote_unix.users",
-    "ext:tech.RemoteAgent.mount_used": "remote_unix.mount_used",
-    "ext:tech.RemoteAgent.mount_capacity": "remote_unix.mount_capacity",
-    "ext:tech.RemoteAgent.mount_available": "remote_unix.mount_available",
-    "ext:tech.RemoteAgent.network_bytes": {
-        "Outgoing": "remote_unix.network_bytes_sent_count",
-        "Incoming": "remote_unix.network_bytes_received_count",
-    },
-    "ext:tech.RemoteAgent.packets": {
-        "Outgoing": "remote_unix.packets_sent_count",
-        "Incoming": "remote_unix.packets_received_count",
-    },
-    "ext:tech.RemoteAgent.network_errors": {
-        "Outgoing": "remote_unix.network_errors_outgoing_count",
-        "Incoming": "remote_unix.network_errors_incoming_count",
-    },
-    "ext:tech.RemoteAgent.packets_dropped": {
-        "Outgoing": "remote_unix.packets_dropped_outgoing_count",
-        "Incoming": "remote_unix.packets_dropped_incoming_count",
-    },
-    "ext:tech.RemoteAgent.uptime": "remote_unix.uptime",
-    "ext:tech.RemoteAgent.individual_cpu_time_user": "remote_unix.individual_cpu_time_user",
-    "ext:tech.RemoteAgent.individual_cpu_time_system": "remote_unix.individual_cpu_time_system",
-    "ext:tech.RemoteAgent.individual_cpu_time_idle": "remote_unix.individual_cpu_time_idle",
-    "ext:tech.RemoteAgent.individual_cpu_time_iowait": "remote_unix.individual_cpu_time_iowait",
-    "ext:tech.RemoteAgent.disk_read": "remote_unix.disk_read_count",
-    "ext:tech.RemoteAgent.disk_write": "remote_unix.disk_write_count",
-    "ext:tech.RemoteAgent.bytes_per_transfer": "remote_unix.bytes_per_transfer",
-    "ext:tech.RemoteAgent.transfers": "remote_unix.transfers",
-    "ext:tech.RemoteAgent.disk_read_ops": "remote_unix.disk_read_ops",
-    "ext:tech.RemoteAgent.disk_write_ops": "remote_unix.disk_write_ops",
-    "ext:tech.RemoteAgent.load_avg_1_min": "remote_unix.load_avg_1_min",
-    "ext:tech.RemoteAgent.load_avg_5_min": "remote_unix.load_avg_5_min",
-    "ext:tech.RemoteAgent.load_avg_15_min": "remote_unix.load_avg_15_min",
-}
-
-ef1_to_ef2_dimension_mappings = {
-    "Process": "process",
-    "PID": "pid",
-    "Name": "name",
-    "Group": "group",
-    "Mount": "mount",
-    "Interface": "interface",
-    "Direction": None,
-    "Id": "id",
-    "Disk": "disk",
-}

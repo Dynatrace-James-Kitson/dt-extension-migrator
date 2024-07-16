@@ -11,6 +11,7 @@ app = typer.Typer()
 
 DIVIDER = "------------------------------------"
 
+TIMEFRAME = "now-1M"
 
 @app.command(
     help="Read tags from EF1 entities and push them to the corresponding EF2 entities"
@@ -45,6 +46,7 @@ def migrate_tags(
         "no_tags_found": [],
         "unable_to_add_tags": [],
         "ef2_hosts_not_found": [],
+        "ef1_hosts_not_found": [],
         "multiple_ef2_hosts_found": [],
     }
 
@@ -59,7 +61,7 @@ def migrate_tags(
         f"type(custom_device),fromRelationships.isInstanceOf(entityId({group_id}))"
     )
     for ef1_device in dt.entities.list(
-        entity_selector=selector, fields="+tags,+fromRelationships"
+        entity_selector=selector, fields="+tags,+fromRelationships", time_from=TIMEFRAME
     ):
         if len(ef1_device.tags) == 0:
             summary_report["no_tags_found"].append(
@@ -73,18 +75,18 @@ def migrate_tags(
         try:
             ef1_id = row["ef1_device_id"]
             ef2_selector = row["ef2_entity_selector"]
-            # raise Exception("TEST")
+
             if tags_by_ef1_id.get(ef1_id, []):
                 response = dt.custom_tags.post(
-                    ef2_selector, tags_by_ef1_id.get(ef1_id, [])
+                    ef2_selector, tags_by_ef1_id.get(ef1_id, []), time_from=TIMEFRAME
                 )
+                print(response)
                 if response.matched_entities_count > 1:
                     summary_report["multiple_ef2_hosts_found"].append(
                         f'EF2 hosts found for selector "{ef2_selector}": {response.matched_entities_count}'
                     )
                     migrated_with_warnings += 1
                 elif response.matched_entities_count == 0:
-                    print(response)
                     summary_report["ef2_hosts_not_found"].append(
                         f'No matching EF2 hosts found for {ef1_id} ("{ef2_selector}").'
                     )
@@ -92,6 +94,9 @@ def migrate_tags(
                 else:
                     successfully_migrated += 1
             else:
+                summary_report["ef1_hosts_not_found"].append(
+                        f'No EF1 host found for {ef1_id}.'
+                    )
                 migrated_with_warnings += 1
         except Exception as e:
             summary_report["unable_to_add_tags"].append(
@@ -123,6 +128,11 @@ def migrate_tags(
         print("EF2 hosts not found:")
         for issue in summary_report["ef2_hosts_not_found"]:
             print(f"[red]{issue}[/red]")
+        print(DIVIDER)
+    if len(summary_report["ef1_hosts_not_found"]) > 0:
+        print("EF1 hosts not found:")
+        for issue in summary_report["ef1_hosts_not_found"]:
+            print(f"[yellow]{issue}[/yellow]")
         print(DIVIDER)
     if len(summary_report["multiple_ef2_hosts_found"]) > 0:
         print("Multiple EF2 hosts found:")
