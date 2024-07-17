@@ -1,5 +1,7 @@
+import dt_extension_migrator.extension_apps.remote_unix
 import dt_extension_migrator.extension_apps.generic_commands
 import dt_extension_migrator.extension_apps.remote_logs
+import dt_extension_migrator.extension_apps.remote_ntp
 import dt_extension_migrator.utility_apps.tags
 import typer
 from typing_extensions import Annotated
@@ -10,8 +12,6 @@ from rich import print
 from typing import Optional
 import json
 
-import dt_extension_migrator.extension_apps.remote_unix
-
 import dt_extension_migrator.utility_apps
 
 app = typer.Typer()
@@ -20,6 +20,7 @@ app.add_typer(
     dt_extension_migrator.extension_apps.generic_commands.app, name="generic-commands"
 )
 app.add_typer(dt_extension_migrator.extension_apps.remote_logs.app, name="remote-logs")
+app.add_typer(dt_extension_migrator.extension_apps.remote_ntp.app, name="remote-ntp")
 
 app.add_typer(dt_extension_migrator.utility_apps.tags.app, name="manual-tags")
 
