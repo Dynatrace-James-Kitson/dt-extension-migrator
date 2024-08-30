@@ -7,12 +7,13 @@ from dynatrace.configuration_v1.dashboard import Dashboard, DashboardStub
 from dynatrace.environment_v2.settings import SettingsObjectCreate
 from dynatrace.http_client import TOO_MANY_REQUESTS_WAIT
 from rich.progress import track
-from rich import print
+# from rich import print
 
 import json
 import math
 from typing import Optional, List
 import re
+from datetime import datetime, timezone
 
 from dt_extension_migrator.logging import logger
 
@@ -29,6 +30,8 @@ EF2_EXTENSION_ID = "com.dynatrace.extension.remote-unix"
 # EF2_EXTENSION_ID = "custom:remote-unix"
 
 EF1_METRIC_PREFIX = "ext:tech.RemoteAgent."
+
+TIMEFRAME = "now-6M"
 
 TIMEOUT = 30
 
@@ -106,6 +109,11 @@ ef1_to_ef2_dimension_mappings = {
     "Disk": "disk",
 }
 
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+
 def replace_dimension(match: re.Match):
     if ef1_to_ef2_dimension_mappings.get(match.group(1)):
         return r"{dims:" + ef1_to_ef2_dimension_mappings.get(match.group(1)) + r"}"
@@ -144,15 +152,18 @@ def build_authentication_from_ef1(ef1_config: dict):
     return authentication
 
 
-def convert_event(event: dict) -> SettingsObjectCreate:
+def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
 
     config = json.loads(event["full_config"])
+    if config['value'].get('legacyId'):
+        del config['value']['legacyId']
+    config['value']['eventEntityDimensionKey'] = 'dt.entity.remote_unix:host'
 
     # query definition
     query_definition = config["value"]["queryDefinition"]
 
     if query_definition["type"] == "METRIC_KEY":
-        config["value"]["summary"] = f"{event['summary']} - 2.0"
+        config["value"]["summary"] = f"{prefix if prefix else ''}{event['summary']}"
         dimension_dict = {
             dim_filter["dimensionKey"]: dim_filter["dimensionValue"]
             for dim_filter in query_definition["dimensionFilter"]
@@ -210,7 +221,7 @@ def convert_event(event: dict) -> SettingsObjectCreate:
             dim_pattern = r"\{dims\:([^\}++]+)\}"
             event_template['title'] = re.sub(dim_pattern, replace_dimension, event_template['title'])
 
-            print(config)
+            print(config['value'])
 
             return SettingsObjectCreate(
                 schema_id="builtin:anomaly-detection.metric-events",
@@ -352,7 +363,6 @@ def build_ef2_config_from_ef1(
 
     return base_config
 
-
 @app.command(
     help="Create dashboard using EF2 remote unix metrics based on EF1 metric dashboard."
 )
@@ -414,6 +424,8 @@ def migrate_events(
             help="The location of a previously pulled/exported list of EF1 remote unix metric events"
         ),
     ],
+    prefix: Optional[str] = "[2.0]",
+    create: Optional[bool] = False
 ):
     xls = pd.ExcelFile(input_file)
     df = pd.read_excel(xls, "metric_events")
@@ -430,12 +442,55 @@ def migrate_events(
     events_to_create: List[SettingsObjectCreate] = []
     for index, event in df.iterrows():
 
-        updated_settings_object = convert_event(event)
+        updated_settings_object = convert_event(event, prefix=prefix)
         if updated_settings_object:
+            print(updated_settings_object.json())
             events_to_create.append(updated_settings_object)
     
-    print(dt.settings.create_object(validate_only=True, body=events_to_create))
 
+    output_file = f'remote-unix-event-migration-result-{datetime.now(tz=timezone.utc).strftime(r"%Y-%m-%d_%H-%M")}.txt'
+    for index, b in enumerate(batch(events_to_create, 200)):
+        with open(output_file, 'a') as f:
+            try:
+                print(f"###Batch {index}###", file=f)
+                r = dt.settings.create_object(validate_only=False, body=b)
+                print(r, file=f)
+            except Exception as e:
+                print(f"Error converting {input_file}: {e}. Check output file {output_file}")
+
+@app.command(help="Delete events starting with specified prefix.")
+def delete_events(
+    dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
+    dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
+    prefix: Annotated[str, typer.Option(help="Prefix.")],
+):
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
+
+    settings_objects = list(
+        dt.settings.list_objects(
+            "builtin:anomaly-detection.metric-events",
+            filter=f"value.summary starts-with '{prefix}'",
+        )
+    )
+
+    if settings_objects:
+        print("The following metric events would be deleted:")
+        for so in settings_objects:
+            print(so.value['summary'])
+
+        proceed = typer.confirm(f"{len(settings_objects)} metric events would be deleted. Proceed?")
+
+        if proceed:
+            for so in track(settings_objects):
+                dt.settings.delete_object(so.object_id)
+            print("Done")
 
 @app.command(help="Pull metric events using EF1 remote unix metrics.")
 def pull_events(
@@ -499,10 +554,21 @@ def pull_events(
                     else:
                         other_conditions += 1
                 
-                matching_entities = dt.entities.list(entity_selector=selector)
+                matching_entities = dt.entities.list(entity_selector=selector, fields="+fromRelationships.isInstanceOf", time_from=TIMEFRAME)
+
+                observered_group_ids = []
+                group_names = []
+                try:
+                    if len(list(matching_entities)) < 50:
+                        for entity in matching_entities:
+                            group_id = entity.from_relationships['isInstanceOf'][0].id
+                            if group_id not in observered_group_ids:
+                                observered_group_ids.append(group_id)
+                                group_names.append(dt.entities.get(group_id).display_name)
+                except Exception as e:
+                    print(f"Warning - error getting group(s) for {settings_object.summary}: {e}")
     
                 entity_names = ", ".join([e.display_name for e in matching_entities])
-                print(entity_names)
                 matching_entity_count = len(list(matching_entities))
         except Exception as e:
             print(f"Warning: {e}")
@@ -516,7 +582,8 @@ def pull_events(
                 "number_of_mz_filters": management_zone_conditions,
                 "number_of_other_conditions": other_conditions,
                 "matching_entity_count": matching_entity_count,
-                "matching_entities": entity_names
+                "matching_entities": entity_names,
+                "groups": ",".join(group_names)
             }
         )
 

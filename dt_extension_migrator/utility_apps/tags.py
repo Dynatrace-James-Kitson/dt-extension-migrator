@@ -1,7 +1,7 @@
 import typer
 from dynatrace import Dynatrace
 import pandas as pd
-from rich import print
+# from rich import print
 
 from typing import Optional, List
 
@@ -11,7 +11,29 @@ app = typer.Typer()
 
 DIVIDER = "------------------------------------"
 
-TIMEFRAME = "now-1M"
+TIMEFRAME = "now-6M"
+
+@app.command(
+    help="Delete tags from any entity."
+)
+def delete_tags(
+    dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
+    dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
+    entity_selector: Annotated[str, typer.Option(help="Entity selector to match when deleting tags.")]
+):
+    dt = Dynatrace(dt_url, dt_token, print_bodies=False)
+    # tags = dt.custom_tags.list(entity_selector=entity_selector, time_from=TIMEFRAME)
+    # for tag in tags:
+    #     print(tag.to_json())
+    entities = dt.entities.list(entity_selector=entity_selector, time_from=TIMEFRAME, fields="+tags")
+    print(f"Matching entities: [{', '.join([e.display_name for e in entities])}]")
+    proceed = typer.confirm(f"This will be deleted from {len(list(entities))} entities. Are you sure?")
+    if proceed:
+        tags = dt.custom_tags.list(entity_selector=entity_selector, time_from=TIMEFRAME)
+        proceed = typer.confirm(f"The following tags will be deleted: [{','.join([t.key for t in tags])}] Are you sure?")
+        if proceed:
+            for tag in tags:
+                dt.custom_tags.delete(entity_selector=entity_selector, key=tag.key, delete_all_with_key=True, time_from=TIMEFRAME)
 
 @app.command(
     help="Read tags from EF1 entities and push them to the corresponding EF2 entities"
