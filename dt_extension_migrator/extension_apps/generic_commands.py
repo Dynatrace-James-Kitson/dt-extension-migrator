@@ -6,6 +6,7 @@ from dynatrace.environment_v2.extensions import MonitoringConfigurationDto
 from dynatrace.http_client import TOO_MANY_REQUESTS_WAIT
 from rich.progress import track
 from rich import print
+import time
 
 import json
 from typing import Optional, List
@@ -25,6 +26,8 @@ app = typer.Typer()
 
 EF1_EXTENSION_ID = "custom.remote.python.generic_commands"
 EF2_EXTENSION_ID = "custom:generic-commands"
+
+EF1_METRIC_PREFIX = "ext:tech.linux."
 
 TIMEOUT = 30
 

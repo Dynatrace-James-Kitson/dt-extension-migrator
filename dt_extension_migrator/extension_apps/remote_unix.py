@@ -7,7 +7,9 @@ from dynatrace.configuration_v1.dashboard import Dashboard, DashboardStub
 from dynatrace.environment_v2.settings import SettingsObjectCreate
 from dynatrace.http_client import TOO_MANY_REQUESTS_WAIT
 from rich.progress import track
-# from rich import print
+import time
+import pathlib
+from rich import print
 
 import json
 import math
@@ -16,6 +18,9 @@ import re
 from datetime import datetime, timezone
 
 from dt_extension_migrator.logging import logger
+
+from dt_extension_migrator.extension_apps.remote_logs import EF1_METRIC_PREFIX as logs_metric_prefix
+from dt_extension_migrator.extension_apps.generic_commands import EF1_METRIC_PREFIX as commands_metric_prefix
 
 from dt_extension_migrator.remote_unix_utils import (
     build_dt_custom_device_id,
@@ -33,7 +38,7 @@ EF1_METRIC_PREFIX = "ext:tech.RemoteAgent."
 
 TIMEFRAME = "now-6M"
 
-TIMEOUT = 30
+TIMEOUT = 120
 
 ef1_to_ef2_key_mappings = {
     "ext:tech.RemoteAgent.availability": "remote_unix.availability",
@@ -151,6 +156,37 @@ def build_authentication_from_ef1(ef1_config: dict):
         )
     return authentication
 
+def convert_to_selector_based(query_definition: dict):
+    old_query_definition = query_definition
+    new_query_definition = {
+        "type": "METRIC_SELECTOR",
+        "metricSelector": f"",
+        "managementZone": old_query_definition.get("managementZone"),
+        "queryOffset": None
+    }
+
+
+    filter_text = ":filter(and("
+    split_by = f":splitBy(\"dt.entity.remote_unix:host\""
+
+    for filter in old_query_definition['dimensionFilter']:
+        split_by += f",\"{filter['dimensionKey']}\""
+        filter_text += f"eq({filter['dimensionKey']},{filter['dimensionValue']})"
+    split_by += ")"
+
+    entity_filter = old_query_definition['entityFilter']
+    filter_text += f",in(\"dt.entity.remote_unix:host\",entitySelector(\"type(remote_unix:host)"
+    for condition in entity_filter['conditions']:
+        if condition['type'] == "TAG":
+            filter_text += f",tag(~\"{condition['value']}~\")"
+        else:
+            raise Exception(f"Non-tag entity filter found: {condition['type']}")
+
+    filter_text+="\"))))"
+    new_query_definition["metricSelector"] = f"{old_query_definition['metricKey']}{filter_text}{split_by}"
+    # if len(old_query_definition['entityFilter']['conditions']) == 1:
+    #     print(old_query_definition)
+    #     print(new_query_definition)
 
 def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
 
@@ -209,6 +245,7 @@ def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
 
             if query_definition['metricKey'].endswith("count"):
                 query_definition['aggregation'] = "VALUE"
+                convert_to_selector_based(query_definition)
 
             config["queryDefinition"] = query_definition
 
@@ -220,8 +257,6 @@ def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
             title = config['value']['eventTemplate']
             dim_pattern = r"\{dims\:([^\}++]+)\}"
             event_template['title'] = re.sub(dim_pattern, replace_dimension, event_template['title'])
-
-            print(config['value'])
 
             return SettingsObjectCreate(
                 schema_id="builtin:anomaly-detection.metric-events",
@@ -237,7 +272,6 @@ def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
 
     else:
         print(f"Found selector: {query_definition}")
-
 
 def build_ef2_config_from_ef1(
     version: str,
@@ -364,22 +398,53 @@ def build_ef2_config_from_ef1(
     return base_config
 
 @app.command(
-    help="Create dashboard using EF2 remote unix metrics based on EF1 metric dashboard."
+    help="Migrate dashboards using either IDs or an input file from 'pull-dashboards'"
 )
-def migrate_dashboards(
+def migrate_dashboard(
     dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
     dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
     id: Annotated[
         Optional[List[str]],
         typer.Option(
-            help="Specify a dashboard ID to convert. Can be passed multiple times."
+            help="Specify a dashboard ID to filter. Can be passed multiple times."
+        ),
+    ] = [],
+    input_file: Annotated[
+        str,
+        typer.Option(
+            help="The location of a previously pulled/exported list of EF1 endpoints"
+        ),
+    ] = None or f"{EF1_EXTENSION_ID}-dashboard-export.xlsx"
+):
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
+    for dash_id in id:
+        dashboard = dt.dashboards.get(dash_id)
+        print(dashboard.dashboard_metadata)
+
+@app.command(
+    help="Pull dashboards using EF1 remote ssh style metrics."
+)
+def pull_dashboards(
+    dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
+    dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
+    id: Annotated[
+        Optional[List[str]],
+        typer.Option(
+            help="Specify a dashboard ID to filter. Can be passed multiple times."
         ),
     ] = [],
     tag: Annotated[
         Optional[List[str]],
         typer.Option(help="A tag to filter for when finding dashboards to convert."),
     ] = None,
-    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}-metric-event-export.xlsx",
+    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}-dashboard-export.xlsx",
 ):
     dt = Dynatrace(
         dt_url,
@@ -410,9 +475,29 @@ def migrate_dashboards(
         except Exception as e:
             print(f"Error pulling full config for dashboard with id {stub.id}: {e}")
 
-    for dashboard in dashboard_full_configs:
-        print(dashboard.tiles)
+    ssh_dashboards = []
 
+    for dashboard in dashboard_full_configs:
+        dashboard_string = json.dumps(dashboard.json())
+        if any(x in dashboard_string for x in [EF1_METRIC_PREFIX, logs_metric_prefix, commands_metric_prefix]):
+            print(dashboard.dashboard_metadata.json())
+            ssh_dashboards.append({
+                "id": dashboard.id,
+                "name": dashboard.dashboard_metadata.name,
+                "owner": dashboard.dashboard_metadata.owner,
+                "popularity": dashboard.dashboard_metadata.json(),
+                "tags": dashboard.dashboard_metadata.tags,
+                "tile_types": ",".join(set([t.tile_type for t in dashboard.tiles])),
+                "configuration": json.dumps(dashboard.json())           }
+            )
+    
+    writer = pd.ExcelWriter(
+        output_file,
+        engine="xlsxwriter",
+    )
+    df = pd.DataFrame(ssh_dashboards)
+    df.to_excel(writer, "dashboards", index=False, header=True)
+    writer.close()
 
 @app.command(help="Migrate events to use EF2 metrics and dimensions.")
 def migrate_events(
@@ -425,7 +510,8 @@ def migrate_events(
         ),
     ],
     prefix: Optional[str] = "[2.0]",
-    create: Optional[bool] = False
+    create: Optional[bool] = False,
+    directory: Optional[str] = "."
 ):
     xls = pd.ExcelFile(input_file)
     df = pd.read_excel(xls, "metric_events")
@@ -434,7 +520,7 @@ def migrate_events(
         dt_url,
         dt_token,
         too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
-        retries=3,
+        retries=5,
         log=logger,
         timeout=TIMEOUT,
     )
@@ -444,19 +530,22 @@ def migrate_events(
 
         updated_settings_object = convert_event(event, prefix=prefix)
         if updated_settings_object:
-            print(updated_settings_object.json())
             events_to_create.append(updated_settings_object)
     
-
     output_file = f'remote-unix-event-migration-result-{datetime.now(tz=timezone.utc).strftime(r"%Y-%m-%d_%H-%M")}.txt'
-    for index, b in enumerate(batch(events_to_create, 200)):
-        with open(output_file, 'a') as f:
+    output_file = pathlib.Path(directory) / output_file
+    print(f"Details will be written to {output_file}.")
+    with open(output_file, 'a') as f:
+        for index, b in enumerate(batch(events_to_create, 50)):
             try:
+                print(f"Creating or validating batch {index+1} of events.")
                 print(f"###Batch {index}###", file=f)
-                r = dt.settings.create_object(validate_only=False, body=b)
+                r = dt.settings.create_object(validate_only=(not create), body=b)
                 print(r, file=f)
+                time.sleep(5)
             except Exception as e:
                 print(f"Error converting {input_file}: {e}. Check output file {output_file}")
+        print("Done.")
 
 @app.command(help="Delete events starting with specified prefix.")
 def delete_events(
@@ -522,18 +611,6 @@ def pull_events(
         management_zone_conditions = 0
         name_filter_conditions = 0
         other_conditions = 0
-        # matching_entities_tags = 0
-
-        # if value['queryDefinition'].get("entityFilter"):
-        #     entity_filter_conditions = len(value['queryDefinition']['entityFilter']['conditions'])
-        #     for condition in value['queryDefinition']['entityFilter']['conditions']:
-        #         if condition['type'] == "TAG":
-        #             tag_conditions += 1
-        #             selector = f'type(CUSTOM_DEVICE),tag({condition['value']})'
-        #             matching_entities_tags += len(list(dt.entities.list(entity_selector=selector, time_from="now-1M")))
-        #         elif condition['type'] == "MANAGEMENT_ZONE":
-        #             management_zone_conditions += 1
-        #             selector = f'type(CUSTOM_DEVICE),managmentZone'
 
         selector = f"type(CUSTOM_DEVICE)"
         matching_entity_count = 0
@@ -594,7 +671,6 @@ def pull_events(
     df = pd.DataFrame(object_list)
     df.to_excel(writer, "metric_events", index=False, header=True)
     writer.close()
-
 
 @app.command(help="Pull EF1 remote unix configurations into a spreadsheet.")
 def pull(
@@ -676,7 +752,6 @@ def pull(
     print("Closing document...")
     writer.close()
     print(f"Exported configurations available in '{output_file}'")
-
 
 @app.command()
 def push(

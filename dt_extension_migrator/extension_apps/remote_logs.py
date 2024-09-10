@@ -25,6 +25,8 @@ from dt_extension_migrator.logging import logger
 EF1_EXTENSION_ID = "custom.remote.python.remote_logs"
 EF2_EXTENSION_ID = "com.dynatrace.extension.remote-logs"
 
+EF1_METRIC_PREFIX = "ext:tech.RemoteLogs."
+
 TIMEOUT = 30
 
 
