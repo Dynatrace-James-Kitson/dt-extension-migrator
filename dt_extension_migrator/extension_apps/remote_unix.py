@@ -36,6 +36,9 @@ EF2_EXTENSION_ID = "com.dynatrace.extension.remote-unix"
 
 EF1_METRIC_PREFIX = "ext:tech.RemoteAgent."
 
+NETWORK_METRICS = ["ext:tech.RemoteAgent.network_bytes", "ext:tech.RemoteAgent.packets", 
+                   "ext:tech.RemoteAgent.network_errors", "ext:tech.RemoteAgent.packets_dropped"]
+
 TIMEFRAME = "now-6M"
 
 TIMEOUT = 120
@@ -103,7 +106,7 @@ ef1_to_ef2_key_mappings = {
 }
 
 ef1_to_ef2_dimension_mappings = {
-    "Process": "process",
+    "Process": "group",
     "PID": "pid",
     "Name": "name",
     "Group": "group",
@@ -112,6 +115,8 @@ ef1_to_ef2_dimension_mappings = {
     "Direction": None,
     "Id": "id",
     "Disk": "disk",
+    "dt.entity.custom_device": "dt.entity.remote_unix:host",
+    "dt.entity.custom_device_group": "dt.entity.remote_unix:host_group"
 }
 
 def batch(iterable, n=1):
@@ -187,6 +192,7 @@ def convert_to_selector_based(query_definition: dict):
     # if len(old_query_definition['entityFilter']['conditions']) == 1:
     #     print(old_query_definition)
     #     print(new_query_definition)
+    return new_query_definition
 
 def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
 
@@ -245,9 +251,10 @@ def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
 
             if query_definition['metricKey'].endswith("count"):
                 query_definition['aggregation'] = "VALUE"
-                convert_to_selector_based(query_definition)
+                query_definition = convert_to_selector_based(query_definition)
 
-            config["queryDefinition"] = query_definition
+            config['value']["queryDefinition"] = query_definition
+    
 
             # event template
             event_template = config['value']['eventTemplate']
@@ -265,7 +272,7 @@ def convert_event(event: dict, prefix: str = None) -> SettingsObjectCreate:
             )
 
         else:
-            print(f"Unkown key: {query_definition['metricKey']}")
+            print(f"Unknown key: {query_definition['metricKey']}")
 
         settings_object = SettingsObjectCreate(schema_id="builtin:anomaly-detection.metric-events", value=config['value'], scope="environment")
         return settings_object
@@ -425,8 +432,54 @@ def migrate_dashboard(
         timeout=TIMEOUT,
     )
     for dash_id in id:
-        dashboard = dt.dashboards.get(dash_id)
-        print(dashboard.dashboard_metadata)
+        try:
+            dashboard = dt.dashboards.get(dash_id)
+            body = dashboard.raw_json
+            print(f"### {body['dashboardMetadata']['name']} ###")
+            del body['id']
+            body['dashboardMetadata']['name'] = f"Migrated - {body['dashboardMetadata']['name']}"
+            for tile in body['tiles']:
+                tile_type = tile['tileType']
+                if tile_type == "DATA_EXPLORER":
+                    for query in tile['queries']:
+                        if query['metric']:
+                            if not query['metric'].startswith(EF1_METRIC_PREFIX):
+                                continue
+                            if query['metric'] in NETWORK_METRICS:
+                                print(f"Review network metrics in tile {tile['name']}: {query['metric']} ")
+                                continue
+                            query['metric'] = ef1_to_ef2_key_mappings.get(query['metric'], "missing")
+                            split_by = query['splitBy']
+                            for index, dimension in enumerate(split_by):
+                                split_by[index] = ef1_to_ef2_dimension_mappings.get(dimension, "missing")
+                                # print(query)
+
+                        elif query['metricSelector']:
+                            selector: str = query['metricSelector']
+                            if not EF1_METRIC_PREFIX in query['metricSelector']:
+                                continue
+                            for network_metric in NETWORK_METRICS:
+                                if network_metric in query['metricSelector']:
+                                    print(f"Review network metric in selector in tile {tile['name']}: {query['metricSelector']} ")
+                                    continue
+                            for old_key in ef1_to_ef2_key_mappings:
+                                if old_key in selector:
+                                     selector = selector.replace(old_key, ef1_to_ef2_key_mappings[old_key])
+                            for old_dimension in ef1_to_ef2_dimension_mappings:
+                                if old_dimension in selector:
+                                    selector = selector.replace(old_dimension, ef1_to_ef2_dimension_mappings[old_dimension])
+                            query['metricSelector'] = selector
+                            print(f"Review updated metric selector in tile {tile['name']}: {query['metricSelector']} ")
+                            continue
+
+            response = dt.dashboards.post(body)
+            response.raise_for_status()
+            
+            base_url = dt_url if not dt_url.endswith("/") else dt_url[:-1]
+            print(f"Migrated dashboard: {base_url}/#dashboard;id={response.json().get('id')}")
+        except Exception as e:
+            print(f"Error migrating dashboard {dash_id}: {e}")
+
 
 @app.command(
     help="Pull dashboards using EF1 remote ssh style metrics."
@@ -485,7 +538,6 @@ def pull_dashboards(
                 "id": dashboard.id,
                 "name": dashboard.dashboard_metadata.name,
                 "owner": dashboard.dashboard_metadata.owner,
-                "popularity": dashboard.dashboard_metadata.json(),
                 "tags": dashboard.dashboard_metadata.tags,
                 "tile_types": ",".join(set([t.tile_type for t in dashboard.tiles])),
                 "configuration": json.dumps(dashboard.json())           }

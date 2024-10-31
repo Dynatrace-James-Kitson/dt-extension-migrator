@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "dt-extension-migrator"
-version = "0.4.4"
+version = "0.5.2"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
@@ -12,7 +12,7 @@ dt-ext-migrator = "dt_extension_migrator.main:app"
 python = "^3.10"
 typer = {extras = ["all"], version = "^0.12.3"}
 pandas = "^2.2.2"
-dt = "^1.1.65"
+dt = "^1.1.66"
 rich = "^13.7.1"
 xlsxwriter = "^3.2.0"
 pymmh3 = "^0.0.5"

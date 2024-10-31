@@ -3,13 +3,19 @@ from typing_extensions import Annotated
 import pandas as pd
 from dynatrace import Dynatrace
 from dynatrace.environment_v2.extensions import MonitoringConfigurationDto
+from dynatrace.environment_v2.settings import SettingsObjectCreate
 from dynatrace.http_client import TOO_MANY_REQUESTS_WAIT
 from rich.progress import track
 from rich import print
+import time
+from datetime import datetime
+from datetime import timezone
+import pathlib
 
 import json
-import math
 from typing import Optional, List
+import math
+from enum import Enum
 import re
 
 from dt_extension_migrator.remote_unix_utils import (
@@ -27,8 +33,23 @@ EF2_EXTENSION_ID = "com.dynatrace.extension.remote-logs"
 
 EF1_METRIC_PREFIX = "ext:tech.RemoteLogs."
 
-TIMEOUT = 30
+TIMEFRAME = "now-6M"
 
+TIMEOUT = 120
+
+ef1_to_ef2_key_mappings = {
+    f"{EF1_METRIC_PREFIX}availability": "remote_logs.availability",
+    f"{EF1_METRIC_PREFIX}file_size": "remote_logs.file_size",
+    f"{EF1_METRIC_PREFIX}log_growth": "remote_logs.log_growth",
+    f"{EF1_METRIC_PREFIX}file_permissions_changed": "remote_logs.file_permissions_changed",
+    f"{EF1_METRIC_PREFIX}matching_log_files": "remote_logs.matching_log_files",
+    f"{EF1_METRIC_PREFIX}pattern_matches": "remote_logs.pattern_matches",
+    f"{EF1_METRIC_PREFIX}value_extractions": "remote_logs.value_extractions"
+}
+
+ef1_to_ef2_dimension_mappings = {
+    "dt.entity.custom_device": "dt.entity.remote_unix:host"
+}
 
 def build_authentication_from_ef1(ef1_config: dict):
     authentication = {"username": ef1_config.get("username")}
@@ -335,6 +356,97 @@ def push(
             )
         except Exception as e:
             print(f"[bold red]{e}[/bold red]")
+
+@app.command(help="Pull metric events using EF1 generic command metrics.")
+def pull_events(
+    dt_url: Annotated[str, typer.Option(envvar="DT_URL")],
+    dt_token: Annotated[str, typer.Option(envvar="DT_TOKEN")],
+    output_file: Optional[str] = None or f"{EF1_EXTENSION_ID}-metric-event-export.xlsx",
+):
+    dt = Dynatrace(
+        dt_url,
+        dt_token,
+        too_many_requests_strategy=TOO_MANY_REQUESTS_WAIT,
+        retries=3,
+        log=logger,
+        timeout=TIMEOUT,
+    )
+    settings_objects = list(
+        dt.settings.list_objects(
+            "builtin:anomaly-detection.metric-events",
+            filter=f"value.queryDefinition.metricKey contains '{EF1_METRIC_PREFIX}' or value.queryDefinition.metricSelector contains '{EF1_METRIC_PREFIX}'",
+        )
+    )
+
+    object_list = []
+    for settings_object in track(settings_objects):
+        value = settings_object.value
+
+        entity_filter_conditions = 0
+        tag_conditions = 0
+        management_zone_conditions = 0
+        name_filter_conditions = 0
+        other_conditions = 0
+
+        selector = f"type(CUSTOM_DEVICE)"
+        matching_entity_count = 0
+
+        try:
+            if value['queryDefinition'].get("entityFilter"):
+                for condition in value['queryDefinition']['entityFilter']['conditions']:
+                    entity_filter_conditions += 1
+                    if condition['type'] == "TAG":
+                        tag_conditions += 1
+                        selector += f",tag({condition['value']})"
+                    elif condition['type'] == "MANAGEMENT_ZONE":
+                        management_zone_conditions += 1
+                        selector += f",mzId({condition['value']})"
+                    elif condition['type'] == "NAME":
+                        name_filter_conditions += 1
+                        selector += f",entityName.startsWith({condition['value']})"
+                    else:
+                        other_conditions += 1
+                
+                matching_entities = dt.entities.list(entity_selector=selector, fields="+fromRelationships.isInstanceOf", time_from=TIMEFRAME)
+
+                observered_group_ids = []
+                group_names = []
+                try:
+                    if len(list(matching_entities)) < 50:
+                        for entity in matching_entities:
+                            group_id = entity.from_relationships['isInstanceOf'][0].id
+                            if group_id not in observered_group_ids:
+                                observered_group_ids.append(group_id)
+                                group_names.append(dt.entities.get(group_id).display_name)
+                except Exception as e:
+                    print(f"Warning - error getting group(s) for {settings_object.summary}: {e}")
+    
+                entity_names = ", ".join([e.display_name for e in matching_entities])
+                matching_entity_count = len(list(matching_entities))
+        except Exception as e:
+            print(f"Warning: {e}")
+        
+        object_list.append(
+            {
+                **settings_object.value,
+                **value,
+                "full_config": json.dumps(settings_object.json()),
+                "number_of_entity_filters": entity_filter_conditions,
+                "number_of_mz_filters": management_zone_conditions,
+                "number_of_other_conditions": other_conditions,
+                "matching_entity_count": matching_entity_count,
+                "matching_entities": entity_names,
+                "groups": ",".join(group_names)
+            }
+        )
+
+    writer = pd.ExcelWriter(
+        output_file,
+        engine="xlsxwriter",
+    )
+    df = pd.DataFrame(object_list)
+    df.to_excel(writer, "metric_events", index=False, header=True)
+    writer.close()
 
 
 if __name__ == "__main__":
