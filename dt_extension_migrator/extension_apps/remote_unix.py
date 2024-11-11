@@ -10,6 +10,7 @@ from rich.progress import track
 import time
 import pathlib
 from rich import print
+import traceback
 
 import json
 import math
@@ -116,7 +117,9 @@ ef1_to_ef2_dimension_mappings = {
     "Id": "id",
     "Disk": "disk",
     "dt.entity.custom_device": "dt.entity.remote_unix:host",
-    "dt.entity.custom_device_group": "dt.entity.remote_unix:host_group"
+    "dt.entity.custom_device_group": "dt.entity.remote_unix:host_group",
+    "custom_device": "remote_unix:host",
+    "custom_device_group": "remote_unix:host_group"
 }
 
 def batch(iterable, n=1):
@@ -442,6 +445,7 @@ def migrate_dashboard(
                 tile_type = tile['tileType']
                 if tile_type == "DATA_EXPLORER":
                     for query in tile['queries']:
+                        print(query)
                         if query['metric']:
                             if not query['metric'].startswith(EF1_METRIC_PREFIX):
                                 continue
@@ -452,26 +456,32 @@ def migrate_dashboard(
                             split_by = query['splitBy']
                             for index, dimension in enumerate(split_by):
                                 split_by[index] = ef1_to_ef2_dimension_mappings.get(dimension, "missing")
-                                # print(query)
-
+                            filter_by = query.get("filterBy")
+                            if filter_by:
+                                for filter in filter_by.get("nestedFilters", []):
+                                    value = filter['filter']
+                                    filter['filter'] = ef1_to_ef2_dimension_mappings.get(value, "missing")
                         elif query['metricSelector']:
                             selector: str = query['metricSelector']
+                            is_network_metric = False
                             if not EF1_METRIC_PREFIX in query['metricSelector']:
                                 continue
                             for network_metric in NETWORK_METRICS:
                                 if network_metric in query['metricSelector']:
                                     print(f"Review network metric in selector in tile {tile['name']}: {query['metricSelector']} ")
-                                    continue
-                            for old_key in ef1_to_ef2_key_mappings:
-                                if old_key in selector:
-                                     selector = selector.replace(old_key, ef1_to_ef2_key_mappings[old_key])
-                            for old_dimension in ef1_to_ef2_dimension_mappings:
-                                if old_dimension in selector:
-                                    selector = selector.replace(old_dimension, ef1_to_ef2_dimension_mappings[old_dimension])
-                            query['metricSelector'] = selector
-                            print(f"Review updated metric selector in tile {tile['name']}: {query['metricSelector']} ")
+                                    is_network_metric = True
+                                    break
+                            if not is_network_metric:
+                                for old_key in ef1_to_ef2_key_mappings:
+                                    if old_key in selector:
+                                        selector = selector.replace(old_key, ef1_to_ef2_key_mappings[old_key])
+                                for old_dimension in ef1_to_ef2_dimension_mappings:
+                                    if old_dimension in selector:
+                                        selector = selector.replace(old_dimension, ef1_to_ef2_dimension_mappings[old_dimension])
+                                query['metricSelector'] = selector
+                                print(f"Review updated metric selector in tile {tile['name']}: {query['metricSelector']} ")
                             continue
-
+        
             response = dt.dashboards.post(body)
             response.raise_for_status()
             
@@ -479,6 +489,7 @@ def migrate_dashboard(
             print(f"Migrated dashboard: {base_url}/#dashboard;id={response.json().get('id')}")
         except Exception as e:
             print(f"Error migrating dashboard {dash_id}: {e}")
+            print(traceback.format_exc())
 
 
 @app.command(
