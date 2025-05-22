@@ -54,7 +54,10 @@ ef1_to_ef2_key_mappings = {
 }
 
 ef1_to_ef2_dimension_mappings = {
-    "dt.entity.custom_device": "dt.entity.remote_unix:host"
+    "dt.entity.custom_device": "dt.entity.remote_unix:host",
+    "dt.entity.custom_device_group": "dt.entity.remote_unix:host_group",
+    "custom_device": "remote_unix:host",
+    "custom_device_group": "remote_unix:host_group"
 }
 
 def batch(iterable, n=1):

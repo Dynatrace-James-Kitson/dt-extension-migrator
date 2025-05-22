@@ -23,6 +23,9 @@ from dt_extension_migrator.logging import logger
 from dt_extension_migrator.extension_apps.remote_logs import EF1_METRIC_PREFIX as logs_metric_prefix
 from dt_extension_migrator.extension_apps.generic_commands import EF1_METRIC_PREFIX as commands_metric_prefix
 
+from dt_extension_migrator.extension_apps.generic_commands import ef1_to_ef2_dimension_mappings as commands_dimension_mappings
+from dt_extension_migrator.extension_apps.generic_commands import ef1_to_ef2_key_mappings as commands_key_mappings
+
 from dt_extension_migrator.remote_unix_utils import (
     build_dt_custom_device_id,
     build_dt_group_id,
@@ -434,6 +437,10 @@ def migrate_dashboard(
         log=logger,
         timeout=TIMEOUT,
     )
+
+    combined_key_mappings = {**ef1_to_ef2_key_mappings, **commands_key_mappings}
+    combined_dimension_mappings = {**ef1_to_ef2_dimension_mappings, **commands_dimension_mappings}
+
     for dash_id in id:
         try:
             dashboard = dt.dashboards.get(dash_id)
@@ -445,26 +452,25 @@ def migrate_dashboard(
                 tile_type = tile['tileType']
                 if tile_type == "DATA_EXPLORER":
                     for query in tile['queries']:
-                        print(query)
                         if query['metric']:
-                            if not query['metric'].startswith(EF1_METRIC_PREFIX):
+                            if not (query['metric'].startswith(EF1_METRIC_PREFIX) or query['metric'].startswith(commands_metric_prefix)):
                                 continue
                             if query['metric'] in NETWORK_METRICS:
                                 print(f"Review network metrics in tile {tile['name']}: {query['metric']} ")
                                 continue
-                            query['metric'] = ef1_to_ef2_key_mappings.get(query['metric'], "missing")
+                            query['metric'] = combined_key_mappings.get(query['metric'], "missing")
                             split_by = query['splitBy']
                             for index, dimension in enumerate(split_by):
-                                split_by[index] = ef1_to_ef2_dimension_mappings.get(dimension, "missing")
+                                split_by[index] = combined_dimension_mappings.get(dimension, "missing")
                             filter_by = query.get("filterBy")
                             if filter_by:
                                 for filter in filter_by.get("nestedFilters", []):
                                     value = filter['filter']
-                                    filter['filter'] = ef1_to_ef2_dimension_mappings.get(value, "missing")
+                                    filter['filter'] = combined_dimension_mappings.get(value, "missing")
                         elif query['metricSelector']:
                             selector: str = query['metricSelector']
                             is_network_metric = False
-                            if not EF1_METRIC_PREFIX in query['metricSelector']:
+                            if not (EF1_METRIC_PREFIX in query['metricSelector'] or commands_metric_prefix in query['metricSelector']):
                                 continue
                             for network_metric in NETWORK_METRICS:
                                 if network_metric in query['metricSelector']:
@@ -472,12 +478,12 @@ def migrate_dashboard(
                                     is_network_metric = True
                                     break
                             if not is_network_metric:
-                                for old_key in ef1_to_ef2_key_mappings:
+                                for old_key in combined_key_mappings:
                                     if old_key in selector:
-                                        selector = selector.replace(old_key, ef1_to_ef2_key_mappings[old_key])
-                                for old_dimension in ef1_to_ef2_dimension_mappings:
+                                        selector = selector.replace(old_key, combined_key_mappings[old_key])
+                                for old_dimension in combined_dimension_mappings:
                                     if old_dimension in selector:
-                                        selector = selector.replace(old_dimension, ef1_to_ef2_dimension_mappings[old_dimension])
+                                        selector = selector.replace(old_dimension, combined_dimension_mappings[old_dimension])
                                 query['metricSelector'] = selector
                                 print(f"Review updated metric selector in tile {tile['name']}: {query['metricSelector']} ")
                             continue
