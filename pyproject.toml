@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "dt-extension-migrator"
 version = "0.5.7"
-description = ""
+description = "test"
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
 
